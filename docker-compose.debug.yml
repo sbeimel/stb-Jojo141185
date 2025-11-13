@@ -1,0 +1,25 @@
+version: '3.4'
+
+services:
+  stb-proxy:
+    #image: stb-proxy:debug
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: debug
+    container_name: stb-proxy
+    environment:
+        - TZ=Europe/Berlin
+        - DEBUG_MODE=1  # Set debug options on runtime (1 = on, 0 = off)
+        #- HOST=[MY_HOSTNAME]:8001 # Uncomment and set this to forward to a specific host name (optional)
+        - FLASK_APP="app"
+        - FLASK_DEBUG="0"
+        - FLASK_ENV="development"
+    command: ["python", "-m", "debugpy", "--wait-for-client", "--listen", "0.0.0.0:5678", "app.py"]
+    ports:
+      - 8001:8001     # publish port for stb-proxy container
+      - 5678:5678     # publish port for debugpy
+    volumes:
+        #- ./app:/app    # let you edit files (without container recreation)
+        - ./config:/config
+    restart: always
