@@ -16,8 +16,7 @@ from flask import (
     make_response,
     flash,
     stream_with_context,
-    jsonify
-)
+    jsonify, url_for)
 import math
 import time
 import requests
@@ -272,34 +271,31 @@ def moveMac(portalId, mac):
     savePortals(portals)
 
 
+
 def test_mac_addresses(url, proxy, macs, name, time_zone):
     """
-    Tests a list of MAC addresses, returns the valid MACs and dead MACs.
+    Tests a list of MAC addresses; tries all proxies (fb1..fb7 per proxy).
+    Returns (valid_macs, dead_macs).
     """
     dead_macs = []
     valid_macs = []
-    url=stb.getUrl(url)
+    url = stb.getUrl(url)
 
     for mac in macs:
-        mac_test_success = False
-        token = stb.getToken(url, mac, proxy, time_zone)
-        if token:
-            stb.getProfile(url, mac, token, proxy, time_zone)
-            expiry = stb.getExpires(url, mac, token, proxy, time_zone)
-            if expiry:
-                mac_test_success = True
-                logger.info(f"Successfully tested MAC({mac}) for Portal({name})")
-                valid_macs.append({
-                    "mac": mac,
-                    "expiry": parseExpieryStr(expiry),
-                })
-            else:
-                logger.error(f"Error retrieving expiry for MAC({mac}) in Portal({name})")
-        if not mac_test_success:
-            logger.error(f"Error testing MAC({mac}) for Portal({name})")
-            flash(f"Error testing MAC({mac}) for Portal({name})", "danger")
-            dead_macs.append(mac)
-
+        try:
+            token, used_proxy = stb.getToken_fb_multi(url, mac, proxy, time_zone)
+            if not token:
+                dead_macs.append({"mac": mac, "reason": "no token across proxies"})
+                continue
+            pxy = used_proxy or proxy
+            stb.getProfile(url, mac, token, pxy, time_zone)
+            expiry = stb.getExpires(url, mac, token, pxy, time_zone)
+            if not expiry:
+                dead_macs.append({"mac": mac, "reason": "no expiry"})
+                continue
+            valid_macs.append({"mac": mac, "expiry": parseExpieryStr(expiry)})
+        except Exception as e:
+            dead_macs.append({"mac": mac, "reason": f"error: {type(e).__name__}"})
     return valid_macs, dead_macs
 
 
@@ -459,7 +455,7 @@ def getChannelByMac(portalId, channelId, mac):
             "Trying to get Link for Portal({}):MAC({}):Channel({})".format(portalId, mac, channelId)
         )
         freeMac = True
-        token = stb.getToken(url, mac, proxy, time_zone)
+        token = stb.getToken_fb(url, mac, proxy, time_zone)
         if token:
             stb.getProfile(url, mac, token, proxy, time_zone)
             channels = stb.getAllChannels(url, mac, token, proxy, time_zone)
@@ -792,7 +788,7 @@ def editor_data():
 
             for mac in macs:
                 try:
-                    token = stb.getToken(url, mac, proxy, time_zone)
+                    token = stb.getToken_fb(url, mac, proxy, time_zone)
                     stb.getProfile(url, mac, token, proxy, time_zone)
                     allChannels = stb.getAllChannels(url, mac, token, proxy, time_zone)
                     genres = stb.getGenreNames(url, mac, token, proxy, time_zone)
@@ -1015,7 +1011,7 @@ def playlist():
         all_channels, genres = None, None
         for mac in macs:
             try:
-                token = stb.getToken(url, mac, proxy, time_zone)
+                token = stb.getToken_fb(url, mac, proxy, time_zone)
                 stb.getProfile(url, mac, token, proxy, time_zone)
                 all_channels = stb.getAllChannels(url, mac, token, proxy, time_zone)
                 genres = stb.getGenreNames(url, mac, token, proxy, time_zone)
@@ -1105,7 +1101,7 @@ def xmltv():
 
                 for mac in macs:
                     try:
-                        token = stb.getToken(url, mac, proxy, time_zone)
+                        token = stb.getToken_fb(url, mac, proxy, time_zone)
                         stb.getProfile(url, mac, token, proxy, time_zone)
                         allChannels = stb.getAllChannels(url, mac, token, proxy, time_zone)
                         epg = stb.getEpg(url, mac, token, 24, proxy, time_zone)
@@ -1565,7 +1561,7 @@ def lineup():
 
                 for mac in macs:
                     try:
-                        token = stb.getToken(url, mac, proxy, time_zone)
+                        token = stb.getToken_fb(url, mac, proxy, time_zone)
                         stb.getProfile(url, mac, token, proxy, time_zone)
                         allChannels = stb.getAllChannels(url, mac, token, proxy, time_zone)
                         break
@@ -1612,3 +1608,177 @@ if __name__ == "__main__":
     else:
         # On release use waitress server with multi-threading
         waitress.serve(app, port=8001, _quiet=True, threads=24)
+
+
+
+@app.route("/playlists", methods=["GET"])
+@authorise
+def playlists_page():
+    """Playlists overview with a robust template fallback."""
+    portals = getPortals()
+    def _is_truthy(v):
+        return str(v).strip().lower() in {"true","1","yes","on"}
+    portals = {pid: p for pid,p in portals.items() if _is_truthy(p.get("enabled"))}
+    portals = dict(sorted(portals.items(), key=lambda kv: (kv[1].get("name") or kv[0])))
+    try:
+        return render_template("playlists.html", portals=portals)
+    except Exception:
+        rows = []
+        for pid, p in portals.items():
+            name = p.get("name") or pid
+            url = p.get("url") or ""
+            rows.append(
+                '<li><strong>' + name + '</strong> '
+                '<small style="color:#666">' + url + '</small> '
+                '<a href="/playlist/' + pid + '" target="_blank">Anzeigen</a> '
+                '<a href="/playlist/' + pid + '.m3u" target="_blank">Download .m3u</a>'
+                '</li>'
+            )
+        html = "<html><head><title>Playlists</title></head><body><h2>Playlists</h2><ul>" + "\n".join(rows) + "</ul></body></html>"
+
+@app.route("/playlist/<portalId>", methods=["GET"])
+@app.route("/playlist/<portalId>.m3u", methods=["GET"])
+@authorise
+def playlist_portal(portalId):
+    portals = getPortals()
+    portal = portals.get(portalId)
+    if not portal or str(portal.get("enabled")).strip().lower() not in {"true","1","yes","on"}:
+        return Response("#EXTM3U\n", mimetype="text/plain")
+    name = portal.get("name")
+    url = portal.get("url")
+    macs = list(portal.get("macs", {}).keys())
+    proxy = portal.get("proxy")
+    time_zone = portal.get("time_zone")
+    enabled_channels = portal.get("enabled channels", [])
+    if not macs or not enabled_channels:
+        return Response("#EXTM3U\n", mimetype="text/plain")
+    all_channels, genres = None, None
+    for mac in macs:
+        try:
+            token = stb.getToken_fb(url, mac, proxy, time_zone)
+            stb.getProfile(url, mac, token, proxy, time_zone)
+            all_channels = stb.getAllChannels(url, mac, token, proxy, time_zone)
+            genres = stb.getGenreNames(url, mac, token, proxy, time_zone)
+            if all_channels and genres:
+                break
+        except Exception:
+            continue
+    if not all_channels or not genres:
+        return Response("#EXTM3U\n", mimetype="text/plain")
+    custom_channel_names = portal.get("custom channel names", {})
+    custom_genres = portal.get("custom genres", {})
+    custom_channel_numbers = portal.get("custom channel numbers", {})
+    custom_epg_ids = portal.get("custom epg ids", {})
+    use_channel_numbers = getSettings().get("use channel numbers", "true") == "true"
+    use_channel_genres = getSettings().get("use channel genres", "true") == "true"
+    entries = []
+    for ch in all_channels:
+        cid = str(ch.get("id"))
+        if cid not in enabled_channels:
+            continue
+        channel_name = custom_channel_names.get(cid, ch.get("name"))
+        genre_id = str(ch.get("tv_genre_id"))
+        genre = custom_genres.get(cid, genres.get(genre_id))
+        channel_number = custom_channel_numbers.get(cid, ch.get("number"))
+        epg_id = custom_epg_ids.get(cid, f"{portalId}{cid}")
+        logo_url = ch.get("logo")
+        header = f'#EXTINF:-1 tvg-id="{epg_id}"'
+        if use_channel_numbers and channel_number:
+            header += f' tvg-chno="{channel_number}"'
+        if logo_url:
+            header += f' tvg-logo="{logo_url}"'
+        if use_channel_genres and genre:
+            header += f' group-title="{genre}"'
+        play_url = url_for("channel", portalId=portalId, channelId=cid, _external=True)
+        entries.append(f"{header}, {channel_name}\n{play_url}")
+    # Sorting
+    if getSettings().get("sort playlist by channel name", "true") == "true":
+        entries.sort(key=lambda x: x.split(",")[1].split("\n")[0])
+    if use_channel_numbers and getSettings().get("sort playlist by channel number", "false") == "true":
+        import re as _re
+        def chan_num(e):
+            m = _re.search(r'tvg-chno="(\d+)"', e)
+            return int(m.group(1)) if m else 1_000_000
+        entries.sort(key=chan_num)
+    playlist = "#EXTM3U\n" + "\n".join(entries)
+    return Response(playlist, mimetype="text/plain")
+
+
+@app.route("/playlist/<portal_id>", methods=["GET"])
+@app.route("/playlist/<portal_id>.m3u", methods=["GET"])
+@authorise
+def playlist_portal(portal_id):
+    portals = getPortals()
+    portal = portals.get(portal_id)
+    if not portal or str(portal.get("enabled")).strip().lower() not in {"true","1","yes","on"}:
+        return Response("#EXTM3U\n", mimetype="text/plain")
+    name = portal.get("name") or portal_id
+    url = portal.get("url")
+    macs = list(portal.get("macs", {}).keys())
+    proxy = portal.get("proxy")
+    time_zone = portal.get("time_zone")
+    enabled_channels = portal.get("enabled channels", [])
+    if not macs or not enabled_channels:
+        return Response("#EXTM3U\n", mimetype="text/plain")
+
+    all_channels, genres = None, None
+    for mac in macs:
+        try:
+            token, used_proxy = stb.getToken_fb_multi(url, mac, proxy, time_zone)
+            if not token:
+                raise Exception("no token")
+            pxy = used_proxy or proxy
+            stb.getProfile(url, mac, token, pxy, time_zone)
+            all_channels = stb.getAllChannels(url, mac, token, pxy, time_zone)
+            genres = stb.getGenreNames(url, mac, token, pxy, time_zone)
+            if all_channels and genres:
+                break
+        except Exception:
+            continue
+
+    if not all_channels or not genres:
+        return Response("#EXTM3U\n", mimetype="text/plain")
+
+    custom_channel_names = portal.get("custom channel names", {})
+    custom_genres = portal.get("custom genres", {})
+    custom_channel_numbers = portal.get("custom channel numbers", {})
+    custom_epg_ids = portal.get("custom epg ids", {})
+
+    use_channel_numbers = getSettings().get("use channel numbers", "true") == "true"
+    use_channel_genres = getSettings().get("use channel genres", "true") == "true"
+
+    entries = []
+    for ch in all_channels:
+        cid = str(ch.get("id"))
+        if cid not in enabled_channels:
+            continue
+        channel_name = custom_channel_names.get(cid, ch.get("name"))
+        genre_id = str(ch.get("tv_genre_id"))
+        genre = custom_genres.get(cid, genres.get(genre_id))
+        channel_number = custom_channel_numbers.get(cid, ch.get("number"))
+        epg_id = custom_epg_ids.get(cid, f"{portal_id}{cid}")
+        logo_url = ch.get("logo")
+
+        header = f'#EXTINF:-1 tvg-id="{epg_id}"'
+        if use_channel_numbers and channel_number:
+            header += f' tvg-chno="{channel_number}"'
+        if logo_url:
+            header += f' tvg-logo="{logo_url}"'
+        if use_channel_genres and genre:
+            header += f' group-title="{genre}"'
+
+        play_url = url_for("channel", portalId=portal_id, channelId=cid, _external=True)
+        entries.append(f"{header}, {channel_name}\n{play_url}")
+
+    # Sorting
+    if getSettings().get("sort playlist by channel name", "true") == "true":
+        entries.sort(key=lambda x: x.split(",")[1].split("\n")[0])
+    if use_channel_numbers and getSettings().get("sort playlist by channel number", "false") == "true":
+        import re as _re
+        def chan_num(e):
+            m = _re.search(r'tvg-chno="(\d+)"', e)
+            return int(m.group(1)) if m else 1_000_000
+        entries.sort(key=chan_num)
+
+    playlist = "#EXTM3U\n" + "\n".join(entries)
+    return Response(playlist, mimetype="text/plain")

@@ -227,3 +227,70 @@ def getEpg(url, mac, token, period, proxy=None, t_zone=None):
             return data
     except:
         pass
+
+
+def getToken_fb(url, mac, proxy=None, t_zone=None):
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    base = {"mac": mac, "stb_lang": "en", "timezone": t_zone}
+    def _extract(resp):
+        try:
+            j = resp.json()
+            if isinstance(j, dict):
+                j = j.get("js", j)
+                return j.get("token") if isinstance(j, dict) else None
+        except Exception:
+            return None
+        return None
+    u = url + "?type=stb&action=handshake&JsHttpRequest=1-xml"
+    variants = [
+        ({"User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C)"}, {}),
+        ({"User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; MAG250; WebKit)"}, {}),
+        ({"User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C)", "X-User-Agent": "Model: MAG254; Link: WiFi"}, {}),
+        ({"User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C)", "Referer": url}, {}),
+    ]
+    for headers, extra in variants:
+        try:
+            r = s.get(u, cookies=base, headers=headers, proxies=proxies, timeout=10)
+            tok = _extract(r)
+            if tok:
+                return tok
+        except Exception:
+            pass
+    try:
+        r = s.post(base_url, params={"type":"stb","action":"handshake","JsHttpRequest":"1-xml"},
+                   cookies=base, headers=variants[0][0], proxies=proxies, timeout=10)
+        tok = _extract(r)
+        if tok:
+            return tok
+    except Exception:
+        pass
+    try:
+        alt = {"mac": mac.lower(), "stb_lang":"en", "timezone": (str(t_zone) if t_zone is not None else None)}
+        r = s.get(u, cookies=alt, headers=variants[0][0], proxies=proxies, timeout=10)
+        tok = _extract(r); 
+        if tok:
+            return tok
+    except Exception:
+        pass
+    try:
+        r = s.get(u + f"&mac={mac}", cookies=base, headers=variants[0][0], proxies=proxies, timeout=10)
+        tok = _extract(r); 
+        if tok:
+            return tok
+    except Exception:
+        pass
+    return None
+
+
+def getToken_fb_multi(url, mac, proxies_str=None, t_zone=None):
+    """Try fb1..fb7 on all proxies (comma/space separated). Returns (token, used_proxy) or (None, None)."""
+    import re as _re
+    proxies = [None]
+    if proxies_str:
+        parts = [p.strip() for p in _re.split(r'[\s,]+', str(proxies_str)) if p.strip()]
+        if parts: proxies = parts
+    for p in proxies:
+        tok = getToken_fb(url, mac, proxy=p, t_zone=t_zone)
+        if tok:
+            return tok, p
+    return None, None
