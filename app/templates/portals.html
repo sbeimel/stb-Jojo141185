@@ -191,7 +191,8 @@
                         <button class="btn btn-danger" id="modalDelete" type="button">Delete</button>
                         <button class="btn btn-warning" id="modalRetestBtn" type="button">Retest</button>
                         <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancel</button>
-                        <button class="btn btn-primary" id="modalSubmit" type="submit" onclick="updateMacData()">Save</button>
+                        <!-- WICHTIG: kein inline onclick mehr, nur noch type="submit" -->
+                        <button class="btn btn-primary" id="modalSubmit" type="submit">Save</button>
                     </div>
 
                     <!-- Error message for the modal -->
@@ -232,35 +233,15 @@
     
             var macList = document.getElementById('macList');
             macList.innerHTML = '';
+            document.getElementById('macInput').value = '';
+            document.getElementById('macsHiddenData').value = '[]';
+            document.getElementById('modalId').value = '';
 
-            // Submit button to add new Portal
-            submitButton.onclick = function () {
-                form.action = "/portal/add";
-
-                // Gather form data and send the AJAX request to the server
-                const formData = new FormData(form);
-
-                fetch('/portal/add', {
-                    method: 'POST',
-                    body: formData
-                })
-                .then(response => {
-                    if (!response.ok) {
-                        // If response status is not OK, throw an error to catch with error message
-                        return response.json().then(err => { throw new Error(err.error); });
-                    }
-                    return response.json();
-                })
-                .then(data => {
-                    // Optionally, close the modal after success
-                    var myModal = new bootstrap.Modal(document.getElementById('modalForm'));
-                    myModal.hide();
-                })
-                .catch(error => {
-                    console.error('Error adding portal:', error);
-                    // Display error message to user
-                    alert('Error: ' + error.message); // or display in a specific HTML element
-                });
+            // WICHTIG: nur ein Submit – kein fetch, kein Doppel-Request
+            // Wir aktualisieren nur die MAC-Daten und lassen den Browser normal submitten.
+            submitButton.onclick = function (e) {
+                updateMacData();
+                // kein preventDefault -> normales Form-Submit auf /portal/add
             };
 
         } else if (action === 'edit') {
@@ -300,25 +281,23 @@
 
             // Event listener for Delete button
             deleteButton.onclick = function () {
-                form.action = "/portal/remove?id="+id;
+                form.action = "/portal/remove?id=" + id;
                 form.submit();
             };
 
             // Event listener for Retest button
             retestButton.onclick = function () {
-                updateMacData()
+                updateMacData();
                 form.action = "/portal/update?id=" + id + "&retest=true";
                 form.submit();
             };
         
             // Event listener for Update button (without retest)
             submitButton.onclick = function () {
-                updateMacData()
+                updateMacData();
                 form.action = "/portal/update?id=" + id + "&retest=false";
                 form.submit();
             };
-
-
         }
         var myModal = new bootstrap.Modal(modal, { backdrop: 'static' });
         myModal.show();
