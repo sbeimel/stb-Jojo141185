@@ -217,7 +217,7 @@
     };
 
     $(document).ready(function () {
-        let dataTable = $('#table').DataTable({
+        let dataTable = var dataTable = $('#table').DataTable({
             dom: "<'row m-1'<'col-auto'B><'col-auto ms-auto'f><'col-auto'l>>" +
                 "<'row'<'col-12'tr>>" +
                 "<'row mb-1 mb-lg-0'<'col-auto text-light'i><'col-auto ms-auto'p>>",
@@ -248,6 +248,12 @@
                     }
                 },
             ],
+            initComplete: function(settings, json) {
+                // Initialize filters once table data has loaded
+                initColumnFilter(3, '#genre-filter-menu');
+                initColumnFilter(7, '#portal-filter-menu');
+            },
+
             language: {
                 search: "",
                 searchPlaceholder: 'Filter',
@@ -465,10 +471,6 @@
 
             menu.find('input.form-check-input').on('change', applyFilter);
         }
-
-        // Initialize filters once table is loaded
-        initColumnFilter(3, '#genre-filter-menu');
-        initColumnFilter(7, '#portal-filter-menu');
 
 
         var isRegexEnabled = dataTable.settings()[0].oPreviousSearch.bRegex;
