@@ -118,60 +118,15 @@
 
 <script>
 
-    // Global filter state for channel editor
-    var channelFilterState = {
-        activeMode: 'all',
-        portals: null,   // null = alle
-        genres: null     // null = alle
-    };
-
-    // Custom DataTables search hook for our channel filters
-    $.fn.dataTable.ext.search.push(function (settings, data, dataIndex) {
-        // Nur auf unsere Haupttabelle anwenden
-        if (settings.nTable.getAttribute('id') !== 'table') {
-            return true;
-        }
-        var table = $('#table').DataTable();
-        var rowData = table.row(dataIndex).data();
-        if (!rowData) {
-            return true;
-        }
-
-        // Active check
-        var enabled = !!rowData.enabled;
-        if (channelFilterState.activeMode === 'active' && !enabled) {
-            return false;
-        }
-        if (channelFilterState.activeMode === 'inactive' && enabled) {
-            return false;
-        }
-
-        // Portal check
-        if (channelFilterState.portals && channelFilterState.portals.length > 0) {
-            var pName = rowData.portalName || rowData.portal || '';
-            if (channelFilterState.portals.indexOf(pName) === -1) {
-                return false;
-            }
-        }
-
-        // Genre check
-        if (channelFilterState.genres && channelFilterState.genres.length > 0) {
-            var gName = rowData.genre || '';
-            if (channelFilterState.genres.indexOf(gName) === -1) {
-                return false;
-            }
-        }
-
-        return true;
-    });
-
-
-    // Dropdown-Filter für Portal und Genre mit Checkboxen
-
+    // Filter-Optionen (Portale/Genres) aus Tabellendaten aufbauen
     function rebuildFilterOptions() {
         var table = $('#table').DataTable();
         var portalMenu = $('#portal-filter-menu');
         var genreMenu = $('#genre-filter-menu');
+
+        if (!portalMenu.length || !genreMenu.length) {
+            return;
+        }
 
         portalMenu.empty();
         genreMenu.empty();
@@ -179,7 +134,7 @@
         // Erste Zeile: Alle
         var portalAllItem = $(
             '<div class="form-check">' +
-                '<input class="form-check-input" type="checkbox" id="portal-filter-all" data-all="1" checked>' +
+                '<input class="form-check-input" type="checkbox" id="portal-filter-all" checked>' +
                 '<label class="form-check-label" for="portal-filter-all">Alle Portale</label>' +
             '</div>'
         );
@@ -187,7 +142,7 @@
 
         var genreAllItem = $(
             '<div class="form-check">' +
-                '<input class="form-check-input" type="checkbox" id="genre-filter-all" data-all="1" checked>' +
+                '<input class="form-check-input" type="checkbox" id="genre-filter-all" checked>' +
                 '<label class="form-check-label" for="genre-filter-all">Alle Genres</label>' +
             '</div>'
         );
@@ -229,7 +184,7 @@
             genreMenu.append(item);
         });
 
-        // "Alle" Klick-Logik: toggelt alle anderen
+        // "Alle" toggelt alle anderen
         $('#portal-filter-all').off('change').on('change', function () {
             var checked = $(this).is(':checked');
             portalMenu.find('.portal-filter-item').prop('checked', checked);
@@ -240,14 +195,12 @@
         });
     }
 
-    
+    // Filter nur anwenden, wenn der Nutzer auf "Process" klickt
     function applyChannelFilters() {
         var table = $('#table').DataTable();
 
-        // Active filter
-        channelFilterState.activeMode = $('#filter-active').val() || 'all';
+        var activeMode = $('#filter-active').val() || 'all';
 
-        // Portal-Selektion
         var portalMenu = $('#portal-filter-menu');
         var portalItems = portalMenu.find('.portal-filter-item');
         var portalSelected = [];
@@ -256,10 +209,8 @@
                 portalSelected.push($(this).data('value'));
             }
         });
-        var allPortalChecked = $('#portal-filter-all').is(':checked') || portalSelected.length === portalItems.length || portalSelected.length === 0;
-        channelFilterState.portals = allPortalChecked ? null : portalSelected;
+        var portalAll = $('#portal-filter-all').is(':checked') || portalSelected.length === 0;
 
-        // Genre-Selektion
         var genreMenu = $('#genre-filter-menu');
         var genreItems = genreMenu.find('.genre-filter-item');
         var genreSelected = [];
@@ -268,58 +219,29 @@
                 genreSelected.push($(this).data('value'));
             }
         });
-        var allGenreChecked = $('#genre-filter-all').is(':checked') || genreSelected.length === genreItems.length || genreSelected.length === 0;
-        channelFilterState.genres = allGenreChecked ? null : genreSelected;
+        var genreAll = $('#genre-filter-all').is(':checked') || genreSelected.length === 0;
 
-        // Neu zeichnen -> ext.search greift
-        table.draw();
-    }
-
-});
-        var portalAllChecked = $('#portal-filter-all').is(':checked') || portalSelected.length === portalItems.length;
-
-        // Genre-Selektion
-        var genreMenu = $('#genre-filter-menu');
-        var genreItems = genreMenu.find('.genre-filter-item');
-        var genreSelected = [];
-        genreItems.each(function () {
-            if ($(this).is(':checked')) {
-                genreSelected.push($(this).data('value'));
-            }
-        });
-        var genreAllChecked = $('#genre-filter-all').is(':checked') || genreSelected.length === genreItems.length;
-
-        // Column-Filter zurücksetzen
-        table.columns().search('');
-
-        // Portalfilter anwenden (Spalte 7)
-        if (!portalAllChecked && portalSelected.length > 0) {
-            var pPattern = '^(' + portalSelected.map($.fn.dataTable.util.escapeRegex).join('|') + ')$';
-            table.column(7).search(pPattern, true, false);
-        }
-
-        // Genrefilter anwenden (Spalte 3)
-        if (!genreAllChecked && genreSelected.length > 0) {
-            var gPattern = '^(' + genreSelected.map($.fn.dataTable.util.escapeRegex).join('|') + ')$';
-            table.column(3).search(gPattern, true, false);
-        }
-
-        table.draw();
-
-        // Active-Filter nach dem Draw auf Zeilenebene
         table.rows().every(function () {
             var row = this;
-            var node = $(row.node());
-            var enabledCheckbox = node.find('input.form-check-input[data-portal][data-channelId]').first();
-            var isEnabled = enabledCheckbox.length ? enabledCheckbox.prop('checked') : false;
-
-            if (activeMode === 'active' && !isEnabled) {
-                node.hide();
-            } else if (activeMode === 'inactive' && isEnabled) {
-                node.hide();
-            } else {
-                node.show();
+            var data = row.data();
+            if (!data) {
+                $(row.node()).show();
+                return;
             }
+
+            var enabled = !!data.enabled;
+            var portalName = data.portalName || data.portal || '';
+            var genre = data.genre || '';
+
+            var portalOk = portalAll || portalSelected.indexOf(portalName) !== -1;
+            var genreOk = genreAll || genreSelected.indexOf(genre) !== -1;
+
+            var activeOk = true;
+            if (activeMode === 'active' && !enabled) activeOk = false;
+            if (activeMode === 'inactive' && enabled) activeOk = false;
+
+            var visible = portalOk && genreOk && activeOk;
+            $(row.node()).toggle(visible);
         });
     }
 
@@ -448,7 +370,7 @@
             orderFixed: [0, 'des'],
             order: [[0, 'des'], [2, 'asc']],
             pageLength: 25,
-            stateSave: false,
+            stateSave: true,
             lengthMenu: [[25, 50, 100, 250, 500, 1000, -1], [25, 50, 100, 250, 500, 1000, "All"]],
             columnDefs: [
                 { targets: [0, 1], width: "0%" },
