@@ -798,11 +798,24 @@ def editor():
 @app.route("/editor_data", methods=["GET"])
 @authorise
 def editor_data():
+    # Optional Filter aus Query-Parametern
+    active = request.args.get("active", "all").strip().lower()
+    portals_filter = request.args.get("portals", "").strip()
+    genres_filter = request.args.get("genres", "").strip()
+
+    portal_set = {p.strip() for p in portals_filter.split(",") if p.strip()} or None
+    genre_set = {g.strip() for g in genres_filter.split(",") if g.strip()} or None
+
     channels = []
     portals = getPortals()
     for portal in portals:
         if portals[portal]["enabled"] == "true":
             portalName = portals[portal]["name"]
+
+            # Portal-Filter: wenn gesetzt, nur ausgewählte Portale laden
+            if portal_set and portalName not in portal_set:
+                continue
+
             url = portals[portal]["url"]
             macs = list(portals[portal]["macs"].keys())
             proxy = portals[portal]["proxy"]
@@ -831,25 +844,38 @@ def editor_data():
                     channelName = str(channel["name"])
                     channelNumber = str(channel["number"])
                     genre = str(genres.get(str(channel["tv_genre_id"])))
+
+                    # Genre-Filter: wenn gesetzt, nur Kanäle mit Genre in Auswahl
+                    if genre_set and genre not in genre_set:
+                        continue
+
                     if channelId in enabledChannels:
                         enabled = True
                     else:
                         enabled = False
-                    customChannelNumber = customChannelNumbers.get(channelId)
-                    if customChannelNumber == None:
+
+                    # Active-Filter: erst nach enabled-Berechnung
+                    if active == "active" and not enabled:
+                        continue
+                    if active == "inactive" and enabled:
+                        continue
+
+                    customChannelNumber = portals[portal].get("custom channel numbers", {}).get(channelId)
+                    if customChannelNumber is None:
                         customChannelNumber = ""
-                    customChannelName = customChannelNames.get(channelId)
-                    if customChannelName == None:
+                    customChannelName = portals[portal].get("custom channel names", {}).get(channelId)
+                    if customChannelName is None:
                         customChannelName = ""
-                    customGenre = customGenres.get(channelId)
-                    if customGenre == None:
+                    customGenre = portals[portal].get("custom genres", {}).get(channelId)
+                    if customGenre is None:
                         customGenre = ""
-                    customEpgId = customEpgIds.get(channelId)
-                    if customEpgId == None:
+                    customEpgId = portals[portal].get("custom epg ids", {}).get(channelId)
+                    if customEpgId is None:
                         customEpgId = ""
-                    fallbackChannel = fallbackChannels.get(channelId)
-                    if fallbackChannel == None:
+                    fallbackChannel = portals[portal].get("fallback channels", {}).get(channelId)
+                    if fallbackChannel is None:
                         fallbackChannel = ""
+
                     channels.append(
                         {
                             "portal": portal,
@@ -885,6 +911,7 @@ def editor_data():
     data = {"data": channels}
 
     return flask.jsonify(data)
+
 
 @app.route("/editor/save", methods=["POST"])
 @authorise
