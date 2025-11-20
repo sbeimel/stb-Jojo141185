@@ -121,6 +121,7 @@
     // Filter-Optionen (Portale/Genres) aus Tabellendaten aufbauen
     
     // Filter-Optionen (Portale/Genres) aus Tabellendaten aufbauen
+    
     function rebuildFilterOptions() {
         var table = $('#table').DataTable();
         var portalMenu = $('#portal-filter-menu');
@@ -168,6 +169,7 @@
         Array.from(portals).sort().forEach(function (p) {
             var raw = p || '';
             var norm = raw.toString().trim().toLowerCase();
+            if (!norm) return;
             var id = 'portal-filter-' + norm.replace(/[^a-z0-9_-]/g, '_');
             var item = $(
                 '<div class="form-check">' +
@@ -181,6 +183,7 @@
         Array.from(genres).sort().forEach(function (g) {
             var raw = g || '';
             var norm = raw.toString().trim().toLowerCase();
+            if (!norm) return;
             var id = 'genre-filter-' + norm.replace(/[^a-z0-9_-]/g, '_');
             var item = $(
                 '<div class="form-check">' +
@@ -191,7 +194,7 @@
             genreMenu.append(item);
         });
 
-        // "Alle"-Checkboxen: toggeln alle anderen in ihrem Menü
+        // "Alle" Klick-Logik: toggelt alle anderen
         $('#portal-filter-all').off('change').on('change', function () {
             var checked = $(this).is(':checked');
             portalMenu.find('.portal-filter-item').prop('checked', checked);
@@ -200,13 +203,28 @@
             var checked = $(this).is(':checked');
             genreMenu.find('.genre-filter-item').prop('checked', checked);
         });
-    }
 
+        // Einzelne Portal-Checkbox verändert "Alle"-Status
+        portalMenu.off('change', '.portal-filter-item').on('change', '.portal-filter-item', function () {
+            var items = portalMenu.find('.portal-filter-item');
+            var checkedCount = items.filter(':checked').length;
+            var allChecked = (checkedCount === items.length);
+            $('#portal-filter-all').prop('checked', allChecked);
+        });
+
+        // Einzelne Genre-Checkbox verändert "Alle"-Status
+        genreMenu.off('change', '.genre-filter-item').on('change', '.genre-filter-item', function () {
+            var items = genreMenu.find('.genre-filter-item');
+            var checkedCount = items.filter(':checked').length;
+            var allChecked = (checkedCount === items.length);
+            $('#genre-filter-all').prop('checked', allChecked);
+        });
+    }
 
 
     // Filter nur anwenden, wenn der Nutzer auf "Process" klickt
     
-    function applyChannelFilters() {
+function applyChannelFilters() {
         var table = $('#table').DataTable();
 
         // Active filter
