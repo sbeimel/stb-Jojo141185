@@ -3,7 +3,17 @@
 
 <div class="container-fluid table-responsive p-lg-5">
 
-    <table id="table" class="table table-striped table-dark nowrap" width="100%">
+    
+    <div class="d-flex flex-wrap gap-2 mb-2">
+        <button type="button" class="btn btn-sm btn-success" onclick="setEnabledForFiltered(true)">
+            Aktivieren (gefilterte Zeilen)
+        </button>
+        <button type="button" class="btn btn-sm btn-danger" onclick="setEnabledForFiltered(false)">
+            Deaktivieren (gefilterte Zeilen)
+        </button>
+    </div>
+    
+        <table id="table" class="table table-striped table-dark nowrap" width="100%">
         <!-- Add a checkbox to toggle to regex search -->
         <div class="row row-cols-auto mb-2 text-light justify-content-end">
             <span class="col">Use Regex Search:</span>
@@ -473,6 +483,24 @@
 
         // Set the search mode based on the checkbox state
         dataTable.search(dataTable.search(), useRegex, !useRegex).draw();
+    }
+
+
+    function setEnabledForFiltered(state) {
+        var table = $('#table').DataTable();
+        // get all rows matching current filter
+        table.rows({ search: 'applied' }).every(function () {
+            var rowNode = this.node();
+            // enabled checkbox is the first checkbox in the row with data-portal & data-channelId
+            var $cb = $(rowNode).find('input.form-check-input[data-portal][data-channelId]').first();
+            if ($cb.length) {
+                if ($cb.prop('checked') !== state) {
+                    $cb.prop('checked', state);
+                    // trigger editEnabled to record the change
+                    editEnabled($cb[0]);
+                }
+            }
+        });
     }
 
 </script>
