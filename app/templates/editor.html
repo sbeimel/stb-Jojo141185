@@ -118,6 +118,54 @@
 
 <script>
 
+    // Global filter state for channel editor
+    var channelFilterState = {
+        activeMode: 'all',
+        portals: null,   // null = alle
+        genres: null     // null = alle
+    };
+
+    // Custom DataTables search hook for our channel filters
+    $.fn.dataTable.ext.search.push(function (settings, data, dataIndex) {
+        // Nur auf unsere Haupttabelle anwenden
+        if (settings.nTable.getAttribute('id') !== 'table') {
+            return true;
+        }
+        var table = $('#table').DataTable();
+        var rowData = table.row(dataIndex).data();
+        if (!rowData) {
+            return true;
+        }
+
+        // Active check
+        var enabled = !!rowData.enabled;
+        if (channelFilterState.activeMode === 'active' && !enabled) {
+            return false;
+        }
+        if (channelFilterState.activeMode === 'inactive' && enabled) {
+            return false;
+        }
+
+        // Portal check
+        if (channelFilterState.portals && channelFilterState.portals.length > 0) {
+            var pName = rowData.portalName || rowData.portal || '';
+            if (channelFilterState.portals.indexOf(pName) === -1) {
+                return false;
+            }
+        }
+
+        // Genre check
+        if (channelFilterState.genres && channelFilterState.genres.length > 0) {
+            var gName = rowData.genre || '';
+            if (channelFilterState.genres.indexOf(gName) === -1) {
+                return false;
+            }
+        }
+
+        return true;
+    });
+
+
     // Dropdown-Filter für Portal und Genre mit Checkboxen
 
     function rebuildFilterOptions() {
@@ -192,11 +240,12 @@
         });
     }
 
+    
     function applyChannelFilters() {
         var table = $('#table').DataTable();
 
         // Active filter
-        var activeMode = $('#filter-active').val();
+        channelFilterState.activeMode = $('#filter-active').val() || 'all';
 
         // Portal-Selektion
         var portalMenu = $('#portal-filter-menu');
@@ -207,6 +256,26 @@
                 portalSelected.push($(this).data('value'));
             }
         });
+        var allPortalChecked = $('#portal-filter-all').is(':checked') || portalSelected.length === portalItems.length || portalSelected.length === 0;
+        channelFilterState.portals = allPortalChecked ? null : portalSelected;
+
+        // Genre-Selektion
+        var genreMenu = $('#genre-filter-menu');
+        var genreItems = genreMenu.find('.genre-filter-item');
+        var genreSelected = [];
+        genreItems.each(function () {
+            if ($(this).is(':checked')) {
+                genreSelected.push($(this).data('value'));
+            }
+        });
+        var allGenreChecked = $('#genre-filter-all').is(':checked') || genreSelected.length === genreItems.length || genreSelected.length === 0;
+        channelFilterState.genres = allGenreChecked ? null : genreSelected;
+
+        // Neu zeichnen -> ext.search greift
+        table.draw();
+    }
+
+});
         var portalAllChecked = $('#portal-filter-all').is(':checked') || portalSelected.length === portalItems.length;
 
         // Genre-Selektion
