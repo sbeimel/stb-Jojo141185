@@ -1200,6 +1200,50 @@ def xmltv():
     )
 
 
+
+@app.route("/xmltv/<portal_id>", methods=["GET"])
+@app.route("/xmltv/<portal_id>.xml", methods=["GET"])
+@authorise
+def xmltv_portal(portal_id):
+    """
+    XMLTV just for a single portal.
+
+    We reuse the existing xmltv() generator and then filter channels/programmes
+    whose id / channel attribute starts with the portal_id.
+    """
+    full = xmltv()
+    # if xmltv() already failed, just propagate that
+    try:
+        status = full.status_code
+    except Exception:
+        return full
+    if status != 200:
+        return full
+
+    xml_data = full.get_data(as_text=True)
+    try:
+        root = ET.fromstring(xml_data)
+    except Exception:
+        # if parsing fails, just return original xmltv
+        return Response(xml_data, mimetype="text/xml")
+
+    new_root = ET.Element(root.tag, root.attrib)
+    for child in root:
+        if child.tag == "channel":
+            cid = str(child.attrib.get("id", ""))
+            if cid.startswith(str(portal_id)):
+                new_root.append(child)
+        elif child.tag == "programme":
+            cid = str(child.attrib.get("channel", ""))
+            if cid.startswith(str(portal_id)):
+                new_root.append(child)
+
+    return Response(
+        ET.tostring(new_root, encoding="unicode", xml_declaration=True),
+        mimetype="text/xml",
+    )
+
+
 @app.route("/play/<portalId>/<channelId>", methods=["GET"])
 def channel(portalId, channelId):
     def genFfmpegCmd():
@@ -1753,7 +1797,18 @@ def playlist_portal(portal_id):
         entries.sort(key=chan_num)
 
     playlist = "#EXTM3U\n" + "\n".join(entries)
-    return Response(playlist, mimetype="text/plain")
+    resp = Response(playlist, mimetype="text/plain")
+    # If the .m3u variant is requested, suggest a filename based on the portal name
+    try:
+        from flask import request as _request
+        import re as _re
+        if _request.path.endswith(".m3u"):
+            safe_name = (name or portal_id) or "playlist"
+            safe_name = _re.sub(r"[^A-Za-z0-9_.-]+", "_", safe_name)
+            resp.headers["Content-Disposition"] = f'attachment; filename="{safe_name}.m3u"'
+    except Exception:
+        pass
+    return resp
 
 
 if __name__ == "__main__":
