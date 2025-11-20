@@ -2,29 +2,54 @@
 {% block content %}
 <div class="container mt-4">
   <h2>Playlists</h2>
-  <div class="mb-3">
-    <a class="btn btn-primary" href="{{ url_for('playlist') }}" target="_blank">Gesamte Playlist (alle aktiven)</a>
+
+  <div class="mb-3 d-flex gap-2">
+    <a class="btn btn-primary" href="{{ url_for('playlist') }}" target="_blank">
+      Gesamte Playlist (alle aktiven)
+    </a>
+    <a class="btn btn-outline-secondary" href="{{ url_for('xmltv') }}" target="_blank">
+      Gesamtes XMLTV (alle aktiven)
+    </a>
   </div>
-  <div class="card"><div class="card-body">
-    <h5 class="card-title">Portale</h5>
-    {% if portals %}
-    <ul class="list-group">
-      {% for pid, p in portals.items() %}
-      <li class="list-group-item d-flex justify-content-between align-items-center">
-        <div>
-          <strong>{{ p.name or pid }}</strong>
-          <small class="text-muted d-block">{{ p.url }}</small>
-        </div>
-        <div class="btn-group">
-          <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('playlist_portal', portal_id=pid) }}" target="_blank">Anzeigen</a>
-          <a class="btn btn-outline-primary btn-sm" href="{{ url_for('playlist_portal', portal_id=pid) }}" target="_blank">Download .m3u</a>
-        </div>
-      </li>
-      {% endfor %}
-    </ul>
-    {% else %}
-    <div class="text-muted">Keine aktiven Portale gefunden.</div>
-    {% endif %}
-  </div></div>
+
+  <div class="card">
+    <div class="card-body">
+      <h5 class="card-title">Portale</h5>
+      {% if portals %}
+      <ul class="list-group">
+        {% for pid, p in portals.items() %}
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+          <div>
+            <strong>{{ p.name or pid }}</strong>
+            <small class="text-muted d-block">{{ p.url }}</small>
+          </div>
+          <div class="btn-group">
+            <!-- Playlist anzeigen (im Browser) -->
+            <a class="btn btn-outline-secondary btn-sm"
+               href="{{ url_for('playlist_portal', portal_id=pid) }}"
+               target="_blank">
+              M3U anzeigen
+            </a>
+            <!-- Playlist herunterladen, Dateiname = Portalname.m3u -->
+            <a class="btn btn-outline-primary btn-sm"
+               href="/playlist/{{ pid }}.m3u"
+               target="_blank">
+              M3U Download
+            </a>
+            <!-- XMLTV nur für dieses Portal -->
+            <a class="btn btn-outline-info btn-sm"
+               href="/xmltv/{{ pid }}.xml"
+               target="_blank">
+              XMLTV Download
+            </a>
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="text-muted">Keine aktiven Portale gefunden.</div>
+      {% endif %}
+    </div>
+  </div>
 </div>
 {% endblock %}
