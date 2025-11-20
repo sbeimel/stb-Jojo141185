@@ -1625,29 +1625,27 @@ def lineup():
     return flask.jsonify(lineup)
 
 
-if __name__ == "__main__":
-    config = loadConfig()
-    if debugMode or ("TERM_PROGRAM" in os.environ.keys() and os.environ["TERM_PROGRAM"] == "vscode"):
-        # If DEBUG is active or code running In VS Code, use default flask development sever in debug mode
-        logger.info("ATTENTION: Server started in debug mode. Don't use on productive systems!")
-        app.run(host="0.0.0.0", port=8001, debug=True, use_reloader=True)
-        # Note: Flask server in debug mode can lead to errors in vscode debugger ([errno 98] address in use)
-        #app.run(host="0.0.0.0", port=8001, debug=False)
-    else:
-        # On release use waitress server with multi-threading
-        waitress.serve(app, port=8001, _quiet=True, threads=24)
-
-
 
 @app.route("/playlists", methods=["GET"])
 @authorise
 def playlists_page():
-    """Playlists overview with a robust template fallback."""
+    """
+    Playlists overview page.
+
+    Shows all enabled portals and links to their individual M3U playlists.
+    If the playlists.html template cannot be rendered for any reason,
+    a very simple HTML fallback is returned.
+    """
     portals = getPortals()
+
     def _is_truthy(v):
-        return str(v).strip().lower() in {"true","1","yes","on"}
-    portals = {pid: p for pid,p in portals.items() if _is_truthy(p.get("enabled"))}
+        return str(v).strip().lower() in {"true", "1", "yes", "on"}
+
+    # only enabled portals
+    portals = {pid: p for pid, p in portals.items() if _is_truthy(p.get("enabled"))}
+    # sort by name, then id
     portals = dict(sorted(portals.items(), key=lambda kv: (kv[1].get("name") or kv[0])))
+
     try:
         return render_template("playlists.html", portals=portals)
     except Exception:
@@ -1656,99 +1654,41 @@ def playlists_page():
             name = p.get("name") or pid
             url = p.get("url") or ""
             rows.append(
-                '<li><strong>' + name + '</strong> '
-                '<small style="color:#666">' + url + '</small> '
-                '<a href="/playlist/' + pid + '" target="_blank">Anzeigen</a> '
+                '<li>'
+                '<strong>' + flask.escape(name) + '</strong> '
+                '<small style="color:#666">' + flask.escape(url) + '</small> '
+                '<a href="/playlist/' + pid + '" target="_blank">View</a> '
                 '<a href="/playlist/' + pid + '.m3u" target="_blank">Download .m3u</a>'
                 '</li>'
             )
-        html = "<html><head><title>Playlists</title></head><body><h2>Playlists</h2><ul>" + "\n".join(rows) + "</ul></body></html>"
-
-@app.route("/playlist/<portalId>", methods=["GET"])
-@app.route("/playlist/<portalId>.m3u", methods=["GET"])
-@authorise
-def playlist_portal(portalId):
-    portals = getPortals()
-    portal = portals.get(portalId)
-    if not portal or str(portal.get("enabled")).strip().lower() not in {"true","1","yes","on"}:
-        return Response("#EXTM3U\n", mimetype="text/plain")
-    name = portal.get("name")
-    url = portal.get("url")
-    macs = list(portal.get("macs", {}).keys())
-    proxy = portal.get("proxy")
-    time_zone = portal.get("time_zone")
-    enabled_channels = portal.get("enabled channels", [])
-    if not macs or not enabled_channels:
-        return Response("#EXTM3U\n", mimetype="text/plain")
-    all_channels, genres = None, None
-    for mac in macs:
-        try:
-            token = stb.getToken_fb(url, mac, proxy, time_zone)
-            stb.getProfile(url, mac, token, proxy, time_zone)
-            all_channels = stb.getAllChannels(url, mac, token, proxy, time_zone)
-            genres = stb.getGenreNames(url, mac, token, proxy, time_zone)
-            if all_channels and genres:
-                break
-        except Exception:
-            continue
-    if not all_channels or not genres:
-        return Response("#EXTM3U\n", mimetype="text/plain")
-    custom_channel_names = portal.get("custom channel names", {})
-    custom_genres = portal.get("custom genres", {})
-    custom_channel_numbers = portal.get("custom channel numbers", {})
-    custom_epg_ids = portal.get("custom epg ids", {})
-    use_channel_numbers = getSettings().get("use channel numbers", "true") == "true"
-    use_channel_genres = getSettings().get("use channel genres", "true") == "true"
-    entries = []
-    for ch in all_channels:
-        cid = str(ch.get("id"))
-        if cid not in enabled_channels:
-            continue
-        channel_name = custom_channel_names.get(cid, ch.get("name"))
-        genre_id = str(ch.get("tv_genre_id"))
-        genre = custom_genres.get(cid, genres.get(genre_id))
-        channel_number = custom_channel_numbers.get(cid, ch.get("number"))
-        epg_id = custom_epg_ids.get(cid, f"{portalId}{cid}")
-        logo_url = ch.get("logo")
-        header = f'#EXTINF:-1 tvg-id="{epg_id}"'
-        if use_channel_numbers and channel_number:
-            header += f' tvg-chno="{channel_number}"'
-        if logo_url:
-            header += f' tvg-logo="{logo_url}"'
-        if use_channel_genres and genre:
-            header += f' group-title="{genre}"'
-        play_url = url_for("channel", portalId=portalId, channelId=cid, _external=True)
-        entries.append(f"{header}, {channel_name}\n{play_url}")
-    # Sorting
-    if getSettings().get("sort playlist by channel name", "true") == "true":
-        entries.sort(key=lambda x: x.split(",")[1].split("\n")[0])
-    if use_channel_numbers and getSettings().get("sort playlist by channel number", "false") == "true":
-        import re as _re
-        def chan_num(e):
-            m = _re.search(r'tvg-chno="(\d+)"', e)
-            return int(m.group(1)) if m else 1_000_000
-        entries.sort(key=chan_num)
-    playlist = "#EXTM3U\n" + "\n".join(entries)
-    return Response(playlist, mimetype="text/plain")
+        html = (
+            "<html><head><title>Playlists</title></head>"
+            "<body><h2>Playlists</h2><ul>" + "\n".join(rows) + "</ul></body></html>"
+        )
+        return Response(html, mimetype="text/html")
 
 
 @app.route("/playlist/<portal_id>", methods=["GET"])
 @app.route("/playlist/<portal_id>.m3u", methods=["GET"])
 @authorise
 def playlist_portal(portal_id):
+    """Generate an M3U playlist for a single portal."""
     portals = getPortals()
     portal = portals.get(portal_id)
-    if not portal or str(portal.get("enabled")).strip().lower() not in {"true","1","yes","on"}:
+    if not portal or str(portal.get("enabled")).strip().lower() not in {"true", "1", "yes", "on"}:
         return Response("#EXTM3U\n", mimetype="text/plain")
+
     name = portal.get("name") or portal_id
     url = portal.get("url")
     macs = list(portal.get("macs", {}).keys())
     proxy = portal.get("proxy")
     time_zone = portal.get("time_zone")
     enabled_channels = portal.get("enabled channels", [])
-    if not macs or not enabled_channels:
+
+    if not url or not macs or not enabled_channels:
         return Response("#EXTM3U\n", mimetype="text/plain")
 
+    # Try all macs until one works
     all_channels, genres = None, None
     for mac in macs:
         try:
@@ -1780,6 +1720,7 @@ def playlist_portal(portal_id):
         cid = str(ch.get("id"))
         if cid not in enabled_channels:
             continue
+
         channel_name = custom_channel_names.get(cid, ch.get("name"))
         genre_id = str(ch.get("tv_genre_id"))
         genre = custom_genres.get(cid, genres.get(genre_id))
@@ -1801,12 +1742,31 @@ def playlist_portal(portal_id):
     # Sorting
     if getSettings().get("sort playlist by channel name", "true") == "true":
         entries.sort(key=lambda x: x.split(",")[1].split("\n")[0])
+
     if use_channel_numbers and getSettings().get("sort playlist by channel number", "false") == "true":
         import re as _re
+
         def chan_num(e):
             m = _re.search(r'tvg-chno="(\d+)"', e)
             return int(m.group(1)) if m else 1_000_000
+
         entries.sort(key=chan_num)
 
     playlist = "#EXTM3U\n" + "\n".join(entries)
     return Response(playlist, mimetype="text/plain")
+
+
+if __name__ == "__main__":
+    config = loadConfig()
+    if debugMode or ("TERM_PROGRAM" in os.environ.keys() and os.environ["TERM_PROGRAM"] == "vscode"):
+        # If DEBUG is active or code running In VS Code, use default flask development sever in debug mode
+        logger.info("ATTENTION: Server started in debug mode. Don't use on productive systems!")
+        app.run(host="0.0.0.0", port=8001, debug=True, use_reloader=True)
+        # Note: Flask server in debug mode can lead to errors in vscode debugger ([errno 98] address in use)
+        #app.run(host="0.0.0.0", port=8001, debug=False)
+    else:
+        # On release use waitress server with multi-threading
+        waitress.serve(app, port=8001, _quiet=True, threads=24)
+
+
+
