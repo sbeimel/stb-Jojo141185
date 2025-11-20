@@ -564,30 +564,80 @@ def portals():
 
 @app.route("/portal/add", methods=["POST"])
 @authorise
+@app.route("/portal/add", methods=["POST"])
+@authorise
 def portals_add():
     """
     Adds a new portal configuration.
+    Accepts both form-data (from the HTML modal) and JSON (for API use).
     """
-    name = request.form.get("name")
-    url = request.form.get("url")
-    proxy = request.form.get("proxy")
-    streams_per_mac = request.form.get("streams per mac")
-    epg_time_offset = request.form.get("epg time offset")
-    time_zone = request.form.get("time_zone")
-    macs_data = request.form.get("macs", "[]")
-    try:
-        macs = json.loads(macs_data) if macs_data else []
-    except json.JSONDecodeError:
-        error_message = f"Error getting MAC data for Portal({name})"
-        logger.error(error_message)
-        return jsonify({"error": error_message}), 400
-    
+    logger.debug("Received request to /portal/add. is_json=%s, form_keys=%s", request.is_json, list(request.form.keys()))
+
+    name = url = proxy = streams_per_mac = epg_time_offset = time_zone = None
+    macs = []
+
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+        logger.debug("JSON payload for /portal/add: %r", data)
+
+        name = (data.get("name") or "").strip()
+        url = (data.get("url") or "").strip()
+        proxy = (data.get("proxy") or "").strip()
+        # allow both "streams per mac" and "streams_per_mac"
+        streams_per_mac = str(data.get("streams per mac") or data.get("streams_per_mac") or "1")
+        epg_time_offset = str(data.get("epg time offset") or data.get("epg_time_offset") or "0")
+        time_zone = (data.get("time_zone") or data.get("timeZone") or "").strip()
+
+        raw_macs = data.get("macs", [])
+        # macs can be list or string
+        if isinstance(raw_macs, str):
+            try:
+                macs = json.loads(raw_macs)
+            except Exception:
+                # Fallback: split by separators
+                macs = [m.strip() for m in re.split(r"[;,\s]+", raw_macs) if m.strip()]
+        elif isinstance(raw_macs, list):
+            macs = raw_macs
+        else:
+            macs = []
+
+    else:
+        # HTML form from portals.html sends multipart/form-data
+        name = (request.form.get("name") or "").strip()
+        url = (request.form.get("url") or "").strip()
+        proxy = (request.form.get("proxy") or "").strip()
+        streams_per_mac = request.form.get("streams per mac") or "1"
+        epg_time_offset = request.form.get("epg time offset") or "0"
+        time_zone = (request.form.get("time_zone") or "").strip()
+
+        macs_data = request.form.get("macs", "[]") or "[]"
+        logger.debug("Form macs raw value for /portal/add: %r", macs_data)
+        try:
+            macs = json.loads(macs_data)
+        except json.JSONDecodeError:
+            error_message = f"Error getting MAC data for Portal({name})"
+            logger.error(error_message)
+            return jsonify({ "error": error_message }), 400
+
+        # If still empty, try to salvage from a raw textarea if present
+        if not macs:
+            raw_text = request.form.get("macInput", "")
+            if raw_text:
+                logger.debug("Falling back to macInput textarea for /portal/add")
+                macs = [m.strip() for m in re.split(r"[;,\s]+", raw_text) if m.strip()]
+
+    # Normalise MAC addresses
+    macs = [m.upper() for m in macs if m]
+
+    logger.debug("Parsed portal-add fields: name=%r, url=%r, proxy=%r, time_zone=%r, streams_per_mac=%r, epg_time_offset=%r, mac_count=%d",
+                 name, url, proxy, time_zone, streams_per_mac, epg_time_offset, len(macs))
+
     # Check name, url and macs
     if not name or not url or not macs:
         error_message = "Can't add Portal. Name, URL and MACs are required"
         logger.error(error_message)
         return jsonify({"error": error_message}), 400
-    
+
     # Validate and retrieve the URL
     if not url.endswith(".php"):
         url = stb.getUrl(url, proxy)
@@ -620,15 +670,13 @@ def portals_add():
         portals = getPortals()
         portals[uuid.uuid4().hex] = portal
         savePortals(portals)
-        
+
         logger.info(f"Portal({portal['name']}) added!")
         return jsonify({"success": f"Portal({portal['name']}) successfully added!"}), 200
     else:
         error_message = f"None of the MACs tested OK for Portal({name}). Adding not successful"
         logger.error(error_message)
         return jsonify({"error": error_message}), 400
-
-
 @app.route("/portal/checkmacs", methods=["POST"])
 @authorise
 def portal_checkmacs():
