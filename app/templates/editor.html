@@ -15,8 +15,8 @@
         <thead>
             <tr>
                 <th>
-                    <div class="form-check form-switch">
-                        <input type="checkbox" class="checkbox form-check-input" onchange="editAll(this)">
+                    <div class="form-check">
+                        <input type="checkbox" class="form-check-input" onchange="editAll(this)">
                     </div>
                 </th>
                 <th>Play</th>
@@ -26,6 +26,31 @@
                 <th>EPG ID</th>
                 <th>Fallback For</th>
                 <th>Portal</th>
+            </tr>
+            <!-- Filter row -->
+            <tr id="filter-row">
+                <th></th>
+                <th></th>
+                <th></th>
+                <th>
+                    <div class="dropdown">
+                        <button class="btn btn-sm btn-outline-light dropdown-toggle w-100" type="button" data-bs-toggle="dropdown">
+                            Genre Filter
+                        </button>
+                        <div class="dropdown-menu p-2" id="genre-filter-menu" style="max-height: 300px; overflow-y: auto;"></div>
+                    </div>
+                </th>
+                <th></th>
+                <th></th>
+                <th></th>
+                <th>
+                    <div class="dropdown">
+                        <button class="btn btn-sm btn-outline-light dropdown-toggle w-100" type="button" data-bs-toggle="dropdown">
+                            Portal Filter
+                        </button>
+                        <div class="dropdown-menu p-2" id="portal-filter-menu" style="max-height: 300px; overflow-y: auto;"></div>
+                    </div>
+                </th>
             </tr>
         </thead>
         <tbody>
@@ -250,21 +275,15 @@
                 "contentType": "application/json"
             },
             columns: [
-                {
+                                {
                     data: "enabled",
                     render: function (data, type, row, meta) {
-                        let r = '<div \
-                                class="form-check form-switch">\
-                                <input \
-                                type="checkbox" \
-                                class="checkbox form-check-input" \
-                                onchange="editEnabled(this)" \
-                                data-portal="' + row.portal + '" \
-                                data-channelId="' + row.channelId + '"'
+                        let r = '<div class="form-check">\
+                                <input                                 type="checkbox"                                 class="form-check-input"                                 onchange="editEnabled(this)"                                 data-portal="' + row.portal + '"                                 data-channelId="' + row.channelId + '"'
                         if (data == true) {
                             r = r + ' checked';
                         }
-                        r = r + '></div>'
+                        r = r + '>';
                         return r
                     }
                 },
@@ -377,6 +396,70 @@
                 { data: "portalName" },
             ],
         });
+
+
+        // Build multi-select dropdown filters for Genre (col 3) and Portal (col 7)
+        function initColumnFilter(colIndex, menuSelector) {
+            var table = $('#table').DataTable();
+            var column = table.column(colIndex);
+            var menu = $(menuSelector);
+            menu.empty();
+
+            // Collect unique, non-empty values
+            var data = column.data().unique().sort();
+            var values = [];
+            data.each(function (d) {
+                if (!d) return;
+                // strip HTML if any
+                var text = $('<div>').html(d).text().trim();
+                if (text && values.indexOf(text) === -1) {
+                    values.push(text);
+                }
+            });
+
+            if (values.length === 0) {
+                menu.append('<small class="text-muted px-2">Keine Werte</small>');
+                return;
+            }
+
+            values.forEach(function (val) {
+                var safeId = (menuSelector.replace('#','') + '-' + val).replace(/[^A-Za-z0-9_-]/g, '_');
+                var item = $(
+                    '<div class="form-check">' +
+                        '<input class="form-check-input" type="checkbox" id="' + safeId + '" checked data-value="' + $('<div>').text(val).html() + '">' +
+                        '<label class="form-check-label" for="' + safeId + '">' + val + '</label>' +
+                    '</div>'
+                );
+                menu.append(item);
+            });
+
+            function applyFilter() {
+                var selected = [];
+                menu.find('input.form-check-input:checked').each(function () {
+                    var v = $(this).data('value');
+                    if (v) {
+                        // escape regex special chars
+                        var escaped = $.fn.dataTable.util.escapeRegex(v);
+                        selected.push(escaped);
+                    }
+                });
+
+                if (selected.length === 0) {
+                    // Use a regex that matches nothing
+                    column.search('a^', true, false).draw();
+                } else {
+                    var pattern = '^(' + selected.join('|') + ')$';
+                    column.search(pattern, true, false).draw();
+                }
+            }
+
+            menu.find('input.form-check-input').on('change', applyFilter);
+        }
+
+        // Initialize filters once table is loaded
+        initColumnFilter(3, '#genre-filter-menu');
+        initColumnFilter(7, '#portal-filter-menu');
+
 
         var isRegexEnabled = dataTable.settings()[0].oPreviousSearch.bRegex;
 
