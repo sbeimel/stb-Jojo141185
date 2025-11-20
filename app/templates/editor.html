@@ -119,6 +119,8 @@
 <script>
 
     // Filter-Optionen (Portale/Genres) aus Tabellendaten aufbauen
+    
+    // Filter-Optionen (Portale/Genres) aus Tabellendaten aufbauen
     function rebuildFilterOptions() {
         var table = $('#table').DataTable();
         var portalMenu = $('#portal-filter-menu');
@@ -131,18 +133,19 @@
         portalMenu.empty();
         genreMenu.empty();
 
-        // Erste Zeile: Alle
+        // Erste Zeile: Alle Portale
         var portalAllItem = $(
             '<div class="form-check">' +
-                '<input class="form-check-input" type="checkbox" id="portal-filter-all" checked>' +
+                '<input class="form-check-input" type="checkbox" id="portal-filter-all" data-all="1" checked>' +
                 '<label class="form-check-label" for="portal-filter-all">Alle Portale</label>' +
             '</div>'
         );
         portalMenu.append(portalAllItem);
 
+        // Erste Zeile: Alle Genres
         var genreAllItem = $(
             '<div class="form-check">' +
-                '<input class="form-check-input" type="checkbox" id="genre-filter-all" checked>' +
+                '<input class="form-check-input" type="checkbox" id="genre-filter-all" data-all="1" checked>' +
                 '<label class="form-check-label" for="genre-filter-all">Alle Genres</label>' +
             '</div>'
         );
@@ -163,28 +166,32 @@
         });
 
         Array.from(portals).sort().forEach(function (p) {
-            var id = 'portal-filter-' + p.replace(/[^A-Za-z0-9_-]/g, '_');
+            var raw = p || '';
+            var norm = raw.toString().trim().toLowerCase();
+            var id = 'portal-filter-' + norm.replace(/[^a-z0-9_-]/g, '_');
             var item = $(
                 '<div class="form-check">' +
-                    '<input class="form-check-input portal-filter-item" type="checkbox" id="' + id + '" data-value="' + $('<div>').text(p).html() + '" checked>' +
-                    '<label class="form-check-label" for="' + id + '">' + p + '</label>' +
+                    '<input class="form-check-input portal-filter-item" type="checkbox" id="' + id + '" data-value="' + norm + '" checked>' +
+                    '<label class="form-check-label" for="' + id + '">' + raw + '</label>' +
                 '</div>'
             );
             portalMenu.append(item);
         });
 
         Array.from(genres).sort().forEach(function (g) {
-            var id = 'genre-filter-' + g.replace(/[^A-Za-z0-9_-]/g, '_');
+            var raw = g || '';
+            var norm = raw.toString().trim().toLowerCase();
+            var id = 'genre-filter-' + norm.replace(/[^a-z0-9_-]/g, '_');
             var item = $(
                 '<div class="form-check">' +
-                    '<input class="form-check-input genre-filter-item" type="checkbox" id="' + id + '" data-value="' + $('<div>').text(g).html() + '" checked>' +
-                    '<label class="form-check-label" for="' + id + '">' + g + '</label>' +
+                    '<input class="form-check-input genre-filter-item" type="checkbox" id="' + id + '" data-value="' + norm + '" checked>' +
+                    '<label class="form-check-label" for="' + id + '">' + raw + '</label>' +
                 '</div>'
             );
             genreMenu.append(item);
         });
 
-        // "Alle" toggelt alle anderen
+        // "Alle"-Checkboxen: toggeln alle anderen in ihrem Menü
         $('#portal-filter-all').off('change').on('change', function () {
             var checked = $(this).is(':checked');
             portalMenu.find('.portal-filter-item').prop('checked', checked);
@@ -195,43 +202,51 @@
         });
     }
 
+
+
     // Filter nur anwenden, wenn der Nutzer auf "Process" klickt
+    
     function applyChannelFilters() {
         var table = $('#table').DataTable();
 
+        // Active filter
         var activeMode = $('#filter-active').val() || 'all';
 
+        // Portale
         var portalMenu = $('#portal-filter-menu');
         var portalItems = portalMenu.find('.portal-filter-item');
         var portalSelected = [];
         portalItems.each(function () {
             if ($(this).is(':checked')) {
-                portalSelected.push($(this).data('value'));
+                var v = ($(this).data('value') || '').toString().trim().toLowerCase();
+                if (v) portalSelected.push(v);
             }
         });
         var portalAll = $('#portal-filter-all').is(':checked') || portalSelected.length === 0;
 
+        // Genres
         var genreMenu = $('#genre-filter-menu');
         var genreItems = genreMenu.find('.genre-filter-item');
         var genreSelected = [];
         genreItems.each(function () {
             if ($(this).is(':checked')) {
-                genreSelected.push($(this).data('value'));
+                var v = ($(this).data('value') || '').toString().trim().toLowerCase();
+                if (v) genreSelected.push(v);
             }
         });
         var genreAll = $('#genre-filter-all').is(':checked') || genreSelected.length === 0;
 
+        // Auf alle Zeilen anwenden
         table.rows().every(function () {
-            var row = this;
-            var data = row.data();
+            var data = this.data();
             if (!data) {
-                $(row.node()).show();
+                this.visible(true);
                 return;
             }
 
             var enabled = !!data.enabled;
-            var portalName = data.portalName || data.portal || '';
-            var genre = data.genre || '';
+            var portalName = (data.portalName || data.portal || '').toString().trim().toLowerCase();
+            var genre = (data.genre || '').toString().trim().toLowerCase();
 
             var portalOk = portalAll || portalSelected.indexOf(portalName) !== -1;
             var genreOk = genreAll || genreSelected.indexOf(genre) !== -1;
@@ -241,9 +256,13 @@
             if (activeMode === 'inactive' && enabled) activeOk = false;
 
             var visible = portalOk && genreOk && activeOk;
-            $(row.node()).toggle(visible);
+            this.visible(visible);
         });
+
+        // Neu zeichnen, ohne Paging zu resetten
+        table.draw(false);
     }
+
 
     var enabledEdits = [];
     var numberEdits = [];
