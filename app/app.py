@@ -1796,7 +1796,15 @@ def playlist_portal(portal_id):
 
         entries.sort(key=chan_num)
 
-    playlist = "#EXTM3U\n" + "\n".join(entries)
+        # M3U header with per-portal XMLTV URL
+    try:
+        xmltv_url = url_for("xmltv_portal", portal_id=portal_id, _external=True)
+    except Exception:
+        xmltv_url = ""
+    if xmltv_url:
+        playlist = f'#EXTM3U url-tvg="{xmltv_url}"\n' + "\n".join(entries)
+    else:
+        playlist = "#EXTM3U\n" + "\n".join(entries)
     resp = Response(playlist, mimetype="text/plain")
     # If the .m3u variant is requested, suggest a filename based on the portal name
     try:
