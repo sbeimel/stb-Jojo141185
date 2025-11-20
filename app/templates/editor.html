@@ -3,50 +3,6 @@
 
 <div class="container-fluid table-responsive p-lg-5">
 
-    
-    <!-- Filter controls above the table -->
-    <div class="card bg-dark text-light mb-3">
-        <div class="card-body">
-            <div class="row g-2 align-items-end">
-                <!-- Active filter -->
-                <div class="col-md-3 col-sm-6">
-                    <label for="filter-active" class="form-label">Aktive / Inaktive Channels</label>
-                    <select id="filter-active" class="form-select form-select-sm">
-                        <option value="all" selected>Alle</option>
-                        <option value="active">Nur aktive</option>
-                        <option value="inactive">Nur inaktive</option>
-                    </select>
-                </div>
-
-                <!-- Portal filter -->
-                <div class="col-md-4 col-sm-6">
-                    <label for="filter-portal" class="form-label">Portale</label>
-                    <select id="filter-portal" class="form-select form-select-sm" multiple>
-                        <!-- wird dynamisch befüllt -->
-                    </select>
-                    <div class="form-text text-muted">Erste Zeile „Alle Portale“ markiert alle.</div>
-                </div>
-
-                <!-- Genre filter -->
-                <div class="col-md-4 col-sm-6">
-                    <label for="filter-genre" class="form-label">Genres</label>
-                    <select id="filter-genre" class="form-select form-select-sm" multiple>
-                        <!-- wird dynamisch befüllt -->
-                    </select>
-                    <div class="form-text text-muted">Mehrere Genres wählbar.</div>
-                </div>
-
-                <!-- Apply button -->
-                <div class="col-md-1 col-sm-6 text-end">
-                    <button type="button" class="btn btn-primary btn-sm mt-3" onclick="applyChannelFilters()">
-                        Process
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-
     <table id="table" class="table table-striped table-dark nowrap" width="100%">
         <!-- Add a checkbox to toggle to regex search -->
         <div class="row row-cols-auto mb-2 text-light justify-content-end">
@@ -114,97 +70,6 @@
     var genreEdits = [];
     var epgEdits = [];
     var fallbackEdits = [];
-
-    // Build selectable lists for portals and genres once data is loaded
-    function rebuildFilterOptions() {
-        var table = $('#table').DataTable();
-        var portalSelect = $('#filter-portal');
-        var genreSelect = $('#filter-genre');
-        portalSelect.empty();
-        genreSelect.empty();
-
-        // Erste Zeile: "Alle"
-        portalSelect.append('<option value="__all__" selected>Alle Portale</option>');
-        genreSelect.append('<option value="__all__" selected>Alle Genres</option>');
-
-        var portals = new Set();
-        var genres = new Set();
-
-        table.rows().every(function() {
-            var row = this.data();
-            if (!row) return;
-            if (row.portalName) {
-                portals.add(row.portalName);
-            }
-            if (row.genre) {
-                genres.add(row.genre);
-            }
-        });
-
-        Array.from(portals).sort().forEach(function(p) {
-            portalSelect.append(
-                $('<option>').attr('value', p).text(p)
-            );
-        });
-
-        Array.from(genres).sort().forEach(function(g) {
-            genreSelect.append(
-                $('<option>').attr('value', g).text(g)
-            );
-        });
-    }
-
-    // Apply filters only when user clicks "Process"
-    function applyChannelFilters() {
-        var table = $('#table').DataTable();
-
-        // Active filter value
-        var activeMode = $('#filter-active').val();
-
-        // Portal selection
-        var portalVals = $('#filter-portal').val() || [];
-        var portalAll = portalVals.includes('__all__') || portalVals.length === 0;
-
-        // Genre selection
-        var genreVals = $('#filter-genre').val() || [];
-        var genreAll = genreVals.includes('__all__') || genreVals.length === 0;
-
-        // Reset previous column searches
-        table.columns().search('');
-
-        // Portal column index 7
-        if (!portalAll) {
-            var pPattern = '^(' + portalVals.map($.fn.dataTable.util.escapeRegex).join('|') + ')$';
-            table.column(7).search(pPattern, true, false);
-        }
-
-        // Genre column index 3
-        if (!genreAll) {
-            var gPattern = '^(' + genreVals.map($.fn.dataTable.util.escapeRegex).join('|') + ')$';
-            table.column(3).search(gPattern, true, false);
-        }
-
-        // Redraw with column filters
-        table.draw();
-
-        // Row-level active/inactive filter after draw
-        table.rows({ search: 'applied' }).every(function() {
-            var row = this;
-            var node = $(row.node());
-            var enabledCheckbox = node.find('input.checkbox[data-portal][data-channelId]').first();
-            var isEnabled = enabledCheckbox.length ? enabledCheckbox.prop('checked') : false;
-
-            if (activeMode === 'active' && !isEnabled) {
-                node.hide();
-            } else if (activeMode === 'inactive' && isEnabled) {
-                node.hide();
-            } else {
-                node.show();
-            }
-        });
-    }
-
-
 
     function editAll(ele) {
         var checkboxes = document.getElementById('table').getElementsByClassName('checkbox');
@@ -317,7 +182,7 @@
     };
 
     $(document).ready(function () {
-        let dataTable = var dataTable = $('#table').DataTable({
+        let dataTable = $('#table').DataTable({
             dom: "<'row m-1'<'col-auto'B><'col-auto ms-auto'f><'col-auto'l>>" +
                 "<'row'<'col-12'tr>>" +
                 "<'row mb-1 mb-lg-0'<'col-auto text-light'i><'col-auto ms-auto'p>>",
@@ -348,12 +213,6 @@
                     }
                 },
             ],
-            initComplete: function(settings, json) {
-                var table = $('#table').DataTable();
-                // clear any saved searches and build filter lists
-                table.search('').columns().search('');
-                rebuildFilterOptions();
-            },
             language: {
                 search: "",
                 searchPlaceholder: 'Filter',
