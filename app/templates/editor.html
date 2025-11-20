@@ -168,12 +168,11 @@
 
         Array.from(portals).sort().forEach(function (p) {
             var raw = p || '';
-            var norm = raw.toString().trim().toLowerCase();
-            if (!norm) return;
-            var id = 'portal-filter-' + norm.replace(/[^a-z0-9_-]/g, '_');
+            if (!raw) return;
+            var id = 'portal-filter-' + raw.toString().trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_');
             var item = $(
                 '<div class="form-check">' +
-                    '<input class="form-check-input portal-filter-item" type="checkbox" id="' + id + '" data-value="' + norm + '" checked>' +
+                    '<input class="form-check-input portal-filter-item" type="checkbox" id="' + id + '" data-value="' + $('<div>').text(raw).html() + '" checked>' +
                     '<label class="form-check-label" for="' + id + '">' + raw + '</label>' +
                 '</div>'
             );
@@ -182,12 +181,11 @@
 
         Array.from(genres).sort().forEach(function (g) {
             var raw = g || '';
-            var norm = raw.toString().trim().toLowerCase();
-            if (!norm) return;
-            var id = 'genre-filter-' + norm.replace(/[^a-z0-9_-]/g, '_');
+            if (!raw) return;
+            var id = 'genre-filter-' + raw.toString().trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_');
             var item = $(
                 '<div class="form-check">' +
-                    '<input class="form-check-input genre-filter-item" type="checkbox" id="' + id + '" data-value="' + norm + '" checked>' +
+                    '<input class="form-check-input genre-filter-item" type="checkbox" id="' + id + '" data-value="' + $('<div>').text(raw).html() + '" checked>' +
                     '<label class="form-check-label" for="' + id + '">' + raw + '</label>' +
                 '</div>'
             );
@@ -204,26 +202,20 @@
             genreMenu.find('.genre-filter-item').prop('checked', checked);
         });
 
-        // Einzelne Portal-Checkbox verändert "Alle"-Status
+        // Einzelne Checkboxen aktualisieren den All-Status
         portalMenu.off('change', '.portal-filter-item').on('change', '.portal-filter-item', function () {
             var items = portalMenu.find('.portal-filter-item');
             var checkedCount = items.filter(':checked').length;
-            var allChecked = (checkedCount === items.length);
-            $('#portal-filter-all').prop('checked', allChecked);
+            $('#portal-filter-all').prop('checked', checkedCount === items.length);
         });
 
-        // Einzelne Genre-Checkbox verändert "Alle"-Status
         genreMenu.off('change', '.genre-filter-item').on('change', '.genre-filter-item', function () {
             var items = genreMenu.find('.genre-filter-item');
             var checkedCount = items.filter(':checked').length;
-            var allChecked = (checkedCount === items.length);
-            $('#genre-filter-all').prop('checked', allChecked);
+            $('#genre-filter-all').prop('checked', checkedCount === items.length);
         });
     }
 
-
-    // Filter nur anwenden, wenn der Nutzer auf "Process" klickt
-    
 function applyChannelFilters() {
         var table = $('#table').DataTable();
 
@@ -236,11 +228,10 @@ function applyChannelFilters() {
         var portalSelected = [];
         portalItems.each(function () {
             if ($(this).is(':checked')) {
-                var v = ($(this).data('value') || '').toString().trim().toLowerCase();
+                var v = ($(this).data('value') || '').toString().trim();
                 if (v) portalSelected.push(v);
             }
         });
-        var portalAll = $('#portal-filter-all').is(':checked') || portalSelected.length === 0;
 
         // Genres
         var genreMenu = $('#genre-filter-menu');
@@ -248,41 +239,30 @@ function applyChannelFilters() {
         var genreSelected = [];
         genreItems.each(function () {
             if ($(this).is(':checked')) {
-                var v = ($(this).data('value') || '').toString().trim().toLowerCase();
+                var v = ($(this).data('value') || '').toString().trim();
                 if (v) genreSelected.push(v);
             }
         });
-        var genreAll = $('#genre-filter-all').is(':checked') || genreSelected.length === 0;
 
-        // Auf alle Zeilen anwenden
-        table.rows().every(function () {
-            var data = this.data();
-            if (!data) {
-                this.visible(true);
-                return;
-            }
+        var params = [];
+        if (activeMode && activeMode !== 'all') {
+            params.push('active=' + encodeURIComponent(activeMode));
+        }
 
-            var enabled = !!data.enabled;
-            var portalName = (data.portalName || data.portal || '').toString().trim().toLowerCase();
-            var genre = (data.genre || '').toString().trim().toLowerCase();
+        if (portalSelected.length > 0 && portalSelected.length !== portalItems.length) {
+            params.push('portals=' + encodeURIComponent(portalSelected.join(',')));
+        }
 
-            var portalOk = portalAll || portalSelected.indexOf(portalName) !== -1;
-            var genreOk = genreAll || genreSelected.indexOf(genre) !== -1;
+        if (genreSelected.length > 0 && genreSelected.length !== genreItems.length) {
+            params.push('genres=' + encodeURIComponent(genreSelected.join(',')));
+        }
 
-            var activeOk = true;
-            if (activeMode === 'active' && !enabled) activeOk = false;
-            if (activeMode === 'inactive' && enabled) activeOk = false;
-
-            var visible = portalOk && genreOk && activeOk;
-            this.visible(visible);
-        });
-
-        // Neu zeichnen, ohne Paging zu resetten
-        table.draw(false);
+        var baseUrl = "{{ url_for('editor_data') }}";
+        var url = baseUrl + (params.length ? '?' + params.join('&') : '');
+        table.ajax.url(url).load();
     }
 
-
-    var enabledEdits = [];
+var enabledEdits = [];
     var numberEdits = [];
     var nameEdits = [];
     var genreEdits = [];
