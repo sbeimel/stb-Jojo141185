@@ -4,17 +4,7 @@
 <div class="container-fluid table-responsive p-lg-5">
 
     
-    <div class="d-flex flex-wrap gap-2 mb-2">
-        <button type="button" class="btn btn-sm btn-success" onclick="setEnabledForFiltered(true)">
-            Aktivieren (gefilterte Zeilen)
-        </button>
-        <button type="button" class="btn btn-sm btn-danger" onclick="setEnabledForFiltered(false)">
-            Deaktivieren (gefilterte Zeilen)
-        </button>
-    </div>
-    
-        
-    <!-- Filter controls -->
+    <!-- Filter controls above the table -->
     <div class="card bg-dark text-light mb-3">
         <div class="card-body">
             <div class="row g-2 align-items-end">
@@ -29,12 +19,12 @@
                 </div>
 
                 <!-- Portal filter -->
-                <div class="col-md-3 col-sm-6">
+                <div class="col-md-4 col-sm-6">
                     <label for="filter-portal" class="form-label">Portale</label>
                     <select id="filter-portal" class="form-select form-select-sm" multiple>
                         <!-- wird dynamisch befüllt -->
                     </select>
-                    <div class="form-text text-muted">Erste Zeile entspricht "Alle".</div>
+                    <div class="form-text text-muted">Erste Zeile „Alle Portale“ markiert alle.</div>
                 </div>
 
                 <!-- Genre filter -->
@@ -47,7 +37,7 @@
                 </div>
 
                 <!-- Apply button -->
-                <div class="col-md-2 col-sm-6 text-end">
+                <div class="col-md-1 col-sm-6 text-end">
                     <button type="button" class="btn btn-primary btn-sm mt-3" onclick="applyChannelFilters()">
                         Process
                     </button>
@@ -56,7 +46,8 @@
         </div>
     </div>
 
-<table id="table" class="table table-striped table-dark nowrap" width="100%">
+
+    <table id="table" class="table table-striped table-dark nowrap" width="100%">
         <!-- Add a checkbox to toggle to regex search -->
         <div class="row row-cols-auto mb-2 text-light justify-content-end">
             <span class="col">Use Regex Search:</span>
@@ -69,7 +60,7 @@
             <tr>
                 <th>
                     <div class="form-check">
-                        <input type="checkbox" class="form-check-input" onchange="editAll(this)">
+                        <input type="checkbox" class="checkbox form-check-input" onchange="editAll(this)">
                     </div>
                 </th>
                 <th>Play</th>
@@ -80,7 +71,6 @@
                 <th>Fallback For</th>
                 <th>Portal</th>
             </tr>
-
         </thead>
         <tbody>
         </tbody>
@@ -125,8 +115,7 @@
     var epgEdits = [];
     var fallbackEdits = [];
 
-    
-    // Build selectable lists for portals and genres after DataTable has data
+    // Build selectable lists for portals and genres once data is loaded
     function rebuildFilterOptions() {
         var table = $('#table').DataTable();
         var portalSelect = $('#filter-portal');
@@ -134,7 +123,7 @@
         portalSelect.empty();
         genreSelect.empty();
 
-        // first row like "Alle"
+        // Erste Zeile: "Alle"
         portalSelect.append('<option value="__all__" selected>Alle Portale</option>');
         genreSelect.append('<option value="__all__" selected>Alle Genres</option>');
 
@@ -169,40 +158,40 @@
     function applyChannelFilters() {
         var table = $('#table').DataTable();
 
-        // Active filter
+        // Active filter value
         var activeMode = $('#filter-active').val();
 
-        // Portal filter
+        // Portal selection
         var portalVals = $('#filter-portal').val() || [];
         var portalAll = portalVals.includes('__all__') || portalVals.length === 0;
 
-        // Genre filter
+        // Genre selection
         var genreVals = $('#filter-genre').val() || [];
         var genreAll = genreVals.includes('__all__') || genreVals.length === 0;
 
-        // Reset any column-specific search first
+        // Reset previous column searches
         table.columns().search('');
 
-        // Portal: column index 7 in DataTables config
+        // Portal column index 7
         if (!portalAll) {
             var pPattern = '^(' + portalVals.map($.fn.dataTable.util.escapeRegex).join('|') + ')$';
             table.column(7).search(pPattern, true, false);
         }
 
-        // Genre: column index 3
+        // Genre column index 3
         if (!genreAll) {
             var gPattern = '^(' + genreVals.map($.fn.dataTable.util.escapeRegex).join('|') + ')$';
             table.column(3).search(gPattern, true, false);
         }
 
-        // Draw with col filters first
+        // Redraw with column filters
         table.draw();
 
-        // Active filter works on row-level: hide/show after draw
-        table.rows().every(function() {
+        // Row-level active/inactive filter after draw
+        table.rows({ search: 'applied' }).every(function() {
             var row = this;
             var node = $(row.node());
-            var enabledCheckbox = node.find('input.form-check-input[data-portal][data-channelId]').first();
+            var enabledCheckbox = node.find('input.checkbox[data-portal][data-channelId]').first();
             var isEnabled = enabledCheckbox.length ? enabledCheckbox.prop('checked') : false;
 
             if (activeMode === 'active' && !isEnabled) {
@@ -215,7 +204,9 @@
         });
     }
 
-function editAll(ele) {
+
+
+    function editAll(ele) {
         var checkboxes = document.getElementById('table').getElementsByClassName('checkbox');
         var enable = ele.checked;
         for (var i = 0, n = checkboxes.length; i < n; i++) {
@@ -326,7 +317,7 @@ function editAll(ele) {
     };
 
     $(document).ready(function () {
-        var dataTable = $('#table').DataTable({
+        let dataTable = var dataTable = $('#table').DataTable({
             dom: "<'row m-1'<'col-auto'B><'col-auto ms-auto'f><'col-auto'l>>" +
                 "<'row'<'col-12'tr>>" +
                 "<'row mb-1 mb-lg-0'<'col-auto text-light'i><'col-auto ms-auto'p>>",
@@ -358,9 +349,11 @@ function editAll(ele) {
                 },
             ],
             initComplete: function(settings, json) {
-                // Initialize filters once table data has loaded
-                },
-
+                var table = $('#table').DataTable();
+                // clear any saved searches and build filter lists
+                table.search('').columns().search('');
+                rebuildFilterOptions();
+            },
             language: {
                 search: "",
                 searchPlaceholder: 'Filter',
@@ -398,15 +391,21 @@ function editAll(ele) {
                 "contentType": "application/json"
             },
             columns: [
-                                {
+                {
                     data: "enabled",
                     render: function (data, type, row, meta) {
-                        let r = '<div class="form-check">\
-                                <input                                 type="checkbox"                                 class="form-check-input"                                 onchange="editEnabled(this)"                                 data-portal="' + row.portal + '"                                 data-channelId="' + row.channelId + '"'
+                        let r = '<div \
+                                class="form-check">\
+                                <input \
+                                type="checkbox" \
+                                class="checkbox form-check-input" \
+                                onchange="editEnabled(this)" \
+                                data-portal="' + row.portal + '" \
+                                data-channelId="' + row.channelId + '"'
                         if (data == true) {
                             r = r + ' checked';
                         }
-                        r = r + '>';
+                        r = r + '></div>'
                         return r
                     }
                 },
@@ -520,8 +519,6 @@ function editAll(ele) {
             ],
         });
 
-
-        // Build multi-select dropdown filters for Genre (col 3) and Portal (col 7)
         var isRegexEnabled = dataTable.settings()[0].oPreviousSearch.bRegex;
 
         // Set Checkbox state based on regex status
@@ -534,24 +531,6 @@ function editAll(ele) {
 
         // Set the search mode based on the checkbox state
         dataTable.search(dataTable.search(), useRegex, !useRegex).draw();
-    }
-
-
-    function setEnabledForFiltered(state) {
-        var table = $('#table').DataTable();
-        // get all rows matching current filter
-        table.rows({ search: 'applied' }).every(function () {
-            var rowNode = this.node();
-            // enabled checkbox is the first checkbox in the row with data-portal & data-channelId
-            var $cb = $(rowNode).find('input.form-check-input[data-portal][data-channelId]').first();
-            if ($cb.length) {
-                if ($cb.prop('checked') !== state) {
-                    $cb.prop('checked', state);
-                    // trigger editEnabled to record the change
-                    editEnabled($cb[0]);
-                }
-            }
-        });
     }
 
 </script>
