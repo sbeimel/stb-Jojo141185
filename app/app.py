@@ -100,7 +100,7 @@ defaultPortal = {
     "enabled": "true",
     "name": "",
     "url": "",
-    "macs": defaultdict(lambda: copy.deepcopy(default_mac_info)),
+    "macs": defaultdict(lambda: default_mac_info),
     "streams per mac": "1",
     "epgTimeOffset": "0",
     "proxy": "",
@@ -301,10 +301,7 @@ def test_mac_addresses(url, proxy, macs, name, time_zone):
 
 def portal_update_macs(portal, macs=None, retest=False):
     # Retrieve old MAC addresses from portal
-    old_macs_dict = portal.get("macs") or {}
-    # In case the stored value is a list (old configs), reset to empty dict
-    if isinstance(old_macs_dict, list):
-        old_macs_dict = {}
+    old_macs_dict = portal["macs"]
     
     old_macs_set = set(old_macs_dict.keys() if old_macs_dict else [])
     new_macs_set = set(macs if macs else [])
@@ -589,36 +586,11 @@ def portals_add():
         streams_per_mac = request.form.get("streams per mac")
         epg_time_offset = request.form.get("epg time offset")
         time_zone = request.form.get("time_zone")
-
-        # Try multiple possible field names for MACs in the HTML form
-        macs_data = (
-            request.form.get("macs")
-            or request.form.get("macs[]")
-            or request.form.get("mac")
-            or request.form.get("mac_addresses")
-            or ""
-        )
-
-        macs = []
-
-        # 1) Try to interpret macs_data as JSON (e.g. ["AA:BB:CC:DD:EE:FF"])
+        macs_data = request.form.get("macs", "[]")
         try:
-            parsed = json.loads(macs_data)
-            if isinstance(parsed, list):
-                macs = parsed
-            elif isinstance(parsed, str):
-                macs_data = parsed
-        except Exception:
-            # Not JSON, fall back to plain text parsing below
-            pass
-
-        # 2) If still empty, treat as plain text (textarea):
-        #    allow separators like newlines, commas, semicolons
-        if not macs and isinstance(macs_data, str):
-            tmp = macs_data.replace("\r", "\n")
-            for sep in [",", ";"]:
-                tmp = tmp.replace(sep, "\n")
-            macs = [m.strip() for m in tmp.split("\n") if m.strip()]
+            macs = json.loads(macs_data) if macs_data else []
+        except json.JSONDecodeError:
+            macs = []
 
     logger.info(f"Add portal request: name={name}, url={url}, macs={macs}")
 
@@ -657,8 +629,7 @@ def portals_add():
         "enabled": "true",
         "name": name,
         "url": url,
-        # Initialize MACs as a dict with default stats structure
-        "macs": defaultdict(lambda: copy.deepcopy(default_mac_info)),
+        "macs": [],
         "streams per mac": streams_per_mac,
         "epgTimeOffset": epg_time_offset,
         "time_zone": time_zone,
@@ -827,11 +798,24 @@ def editor():
 @app.route("/editor_data", methods=["GET"])
 @authorise
 def editor_data():
+    # Optional Filter aus Query-Parametern
+    active = request.args.get("active", "all").strip().lower()
+    portals_filter = request.args.get("portals", "").strip()
+    genres_filter = request.args.get("genres", "").strip()
+
+    portal_set = {p.strip() for p in portals_filter.split(",") if p.strip()} or None
+    genre_set = {g.strip() for g in genres_filter.split(",") if g.strip()} or None
+
     channels = []
     portals = getPortals()
     for portal in portals:
         if portals[portal]["enabled"] == "true":
             portalName = portals[portal]["name"]
+
+            # Portal-Filter: wenn gesetzt, nur ausgewählte Portale laden
+            if portal_set and portalName not in portal_set:
+                continue
+
             url = portals[portal]["url"]
             macs = list(portals[portal]["macs"].keys())
             proxy = portals[portal]["proxy"]
@@ -860,25 +844,38 @@ def editor_data():
                     channelName = str(channel["name"])
                     channelNumber = str(channel["number"])
                     genre = str(genres.get(str(channel["tv_genre_id"])))
+
+                    # Genre-Filter: wenn gesetzt, nur Kanäle mit Genre in Auswahl
+                    if genre_set and genre not in genre_set:
+                        continue
+
                     if channelId in enabledChannels:
                         enabled = True
                     else:
                         enabled = False
-                    customChannelNumber = customChannelNumbers.get(channelId)
-                    if customChannelNumber == None:
+
+                    # Active-Filter: erst nach enabled-Berechnung
+                    if active == "active" and not enabled:
+                        continue
+                    if active == "inactive" and enabled:
+                        continue
+
+                    customChannelNumber = portals[portal].get("custom channel numbers", {}).get(channelId)
+                    if customChannelNumber is None:
                         customChannelNumber = ""
-                    customChannelName = customChannelNames.get(channelId)
-                    if customChannelName == None:
+                    customChannelName = portals[portal].get("custom channel names", {}).get(channelId)
+                    if customChannelName is None:
                         customChannelName = ""
-                    customGenre = customGenres.get(channelId)
-                    if customGenre == None:
+                    customGenre = portals[portal].get("custom genres", {}).get(channelId)
+                    if customGenre is None:
                         customGenre = ""
-                    customEpgId = customEpgIds.get(channelId)
-                    if customEpgId == None:
+                    customEpgId = portals[portal].get("custom epg ids", {}).get(channelId)
+                    if customEpgId is None:
                         customEpgId = ""
-                    fallbackChannel = fallbackChannels.get(channelId)
-                    if fallbackChannel == None:
+                    fallbackChannel = portals[portal].get("fallback channels", {}).get(channelId)
+                    if fallbackChannel is None:
                         fallbackChannel = ""
+
                     channels.append(
                         {
                             "portal": portal,
@@ -914,6 +911,7 @@ def editor_data():
     data = {"data": channels}
 
     return flask.jsonify(data)
+
 
 @app.route("/editor/save", methods=["POST"])
 @authorise
@@ -1825,7 +1823,15 @@ def playlist_portal(portal_id):
 
         entries.sort(key=chan_num)
 
-    playlist = "#EXTM3U\n" + "\n".join(entries)
+        # M3U header with per-portal XMLTV URL
+    try:
+        xmltv_url = url_for("xmltv_portal", portal_id=portal_id, _external=True)
+    except Exception:
+        xmltv_url = ""
+    if xmltv_url:
+        playlist = f'#EXTM3U url-tvg="{xmltv_url}"\n' + "\n".join(entries)
+    else:
+        playlist = "#EXTM3U\n" + "\n".join(entries)
     resp = Response(playlist, mimetype="text/plain")
     # If the .m3u variant is requested, suggest a filename based on the portal name
     try:
