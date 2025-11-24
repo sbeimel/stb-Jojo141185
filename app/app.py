@@ -1,12 +1,70 @@
-import threading
-import stb
+import sys
 import os
+import shutil
+import time
+from datetime import datetime, timedelta, timezone
+import xml.etree.ElementTree as ET
+import xml.dom.minidom as minidom
+import threading
+from threading import Thread
+import logging
+
+logger = logging.getLogger("MacReplayV2")
+logger.setLevel(logging.INFO)
+logFormat = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+# Docker-optimized paths
+if os.getenv("CONFIG"):
+    configFile = os.getenv("CONFIG")
+    log_dir = os.path.dirname(configFile)
+else:
+    # Default paths for container
+    log_dir = "/app/data"
+    configFile = os.path.join(log_dir, "MacReplayV2.json")
+
+# Create directories if they don't exist
+os.makedirs(log_dir, exist_ok=True)
+os.makedirs("/app/logs", exist_ok=True)
+
+# Seamlessly migrate legacy MacReplay config filenames to the new MacReplayV2 convention
+legacyConfigFile = os.path.join(log_dir, "MacReplay.json")
+if not os.path.exists(configFile) and os.path.exists(legacyConfigFile):
+    shutil.copy2(legacyConfigFile, configFile)
+    logger.info("Legacy MacReplay config detected – migrated to MacReplayV2.json")
+
+# Log file path for container
+log_file_path = os.path.join("/app/logs", "MacReplayV2.log")
+
+# Set up logging
+fileHandler = logging.FileHandler(log_file_path)
+fileHandler.setFormatter(logFormat)
+logger.addHandler(fileHandler)
+
+consoleFormat = logging.Formatter("[%(levelname)s] %(message)s")
+consoleHandler = logging.StreamHandler()
+consoleHandler.setFormatter(consoleFormat)
+logger.addHandler(consoleHandler)
+
+# Docker-optimized ffmpeg paths (system-installed)
+ffmpeg_path = "ffmpeg"
+ffprobe_path = "ffprobe"
+
+# Check if the binaries exist
+import subprocess
+try:
+    subprocess.run([ffmpeg_path, "-version"], capture_output=True, check=True)
+    subprocess.run([ffprobe_path, "-version"], capture_output=True, check=True)
+    logger.info("FFmpeg and FFprobe found and working")
+except (subprocess.CalledProcessError, FileNotFoundError):
+    logger.error("Error: ffmpeg or ffprobe not found!")
+
+import flask
+from flask import Flask, jsonify
+import stb  # deine STB-Handshake-Logik
 import json
 import subprocess
 import uuid
-import logging
-import xml.etree.cElementTree as ET
-import flask
+import xml.etree.cElementTree as CET
 from flask import (
     Flask,
     render_template,
@@ -15,691 +73,1675 @@ from flask import (
     Response,
     make_response,
     flash,
-    stream_with_context,
-    jsonify, url_for)
-import math
-import time
-import requests
-from datetime import datetime, timezone
-from dateutil.parser import parse
+)
 from functools import wraps
 import secrets
 import waitress
-from collections import defaultdict
-import copy
-
-# Lock for multi-threading  
-lock = threading.Lock()
 
 app = Flask(__name__)
 app.secret_key = secrets.token_urlsafe(32)
 
-logger = logging.getLogger("STB-Proxy")
-logFormat = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-fileHandler = logging.FileHandler("proxy.log")
-fileHandler.setFormatter(logFormat)
-logger = logging.getLogger("STB-Proxy")
-
-logger.addHandler(fileHandler)
-logging.basicConfig(level=logging.INFO)
-
-config_file_name = "config.json"
-debugMode = False
+# Add custom Jinja2 filter for JSON serialization
+@app.template_filter("tojsonfilter")
+def tojson_filter(obj):
+    return json.dumps(obj)
 
 
-# Function to check and create the config file if it doesn't exist
-def check_and_create_config():
-    if not os.path.exists(config_file_name):
-        logger.warning("No existing config found. Creating a new one")
-        default_config = {
-            "portals": {},
-            "settings": {
-                "version": "1.0.0",
-                "language": "en",
-                "proxy": None,
-                "update_url": "",
-                "username": "",
-                "password": ""
-            }
-        }
-        saveConfig(default_config)
+# Docker-optimized host configuration
+if os.getenv("HOST"):
+    host = os.getenv("HOST")
+else:
+    host = "0.0.0.0:8001"
+logger.info(f"Server started on http://{host}")
 
-# Function to load the configuration from the file
-def loadConfig():
-    check_and_create_config()  # Ensure config file exists
-    with open(config_file_name, "r") as f:
-        config = json.load(f)
-    return config
+try:
+    EPG_REFRESH_INTERVAL_HOURS = float(os.getenv("EPG_REFRESH_INTERVAL_HOURS", 4))
+except ValueError:
+    logger.warning(
+        "Invalid EPG_REFRESH_INTERVAL_HOURS value supplied; defaulting to 4 hours."
+    )
+    EPG_REFRESH_INTERVAL_HOURS = 4.0
 
-# Function to save the configuration to the file
-def saveConfig(config):
-    with open(config_file_name, "w") as f:
-        json.dump(config, f, indent=4)
+EPG_REFRESH_INTERVAL_SECONDS = max(60, int(EPG_REFRESH_INTERVAL_HOURS * 3600))
 
-def getSettings():
-    config = loadConfig()
-    return config.get("settings", {})
+logger.info(f"Using config file: {configFile}")
 
-def saveSettings(settings):
-    config = loadConfig()
-    config["settings"] = settings
-    saveConfig(config)
+occupied = {}
+config = {}
+cached_lineup = []
+cached_playlist = None
+last_playlist_host = None
+cached_xmltv = None
+last_updated = 0
 
-def getPortals():
-    config = loadConfig()
-    return config.get("portals", {})
+# optional Vorlage, wird im channel() dynamisch aus Settings gebaut
+d_ffmpegcmd = [
+    "-re",
+    "-http_proxy",
+    "<proxy>",
+    "-timeout",
+    "<timeout>",
+    "-i",
+    "<url>",
+    "-map",
+    "0",
+    "-codec",
+    "copy",
+    "-f",
+    "mpegts",
+    "-flush_packets",
+    "0",
+    "-fflags",
+    "+nobuffer",
+    "-flags",
+    "low_delay",
+    "-strict",
+    "experimental",
+    "-analyzeduration",
+    "0",
+    "-probesize",
+    "32",
+    "-copyts",
+    "-threads",
+    "12",
+    "pipe:",
+]
 
-def savePortals(portals):
-    config = loadConfig()
-    config["portals"] = portals
-    saveConfig(config)
-
-def settings():
-    settings = getSettings()
-
-    return render_template("settings.html", settings=settings)
-
-
-def saveSettingsForm(settings_dict):
-    settings = getSettings()
-    settings.update(settings_dict)
-    saveSettings(settings)
-
-def get_proxy():
-    settings = getSettings()
-    return settings.get("proxy", None)
-
-def authorise(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        settings = getSettings()
-        username = settings.get("username")
-        password = settings.get("password")
-
-        if username and password:
-            auth = request.authorization
-
-            if not auth or not (auth.username == username and auth.password == password):
-                return Response(
-                    "Login required.",
-                    401,
-                    {"WWW-Authenticate": 'Basic realm="Login Required"'},
-                )
-        return f(*args, **kwargs)
-    return decorated_function
-
-
-@app.route("/")
-@authorise
-def home():
-    portals = getPortals()
-    settings_data = getSettings()
-    return render_template("index.html", portals=portals, settings=settings_data)
-
-
-@app.route("/settings", methods=["GET", "POST"])
-@authorise
-def settings_page():
-    if request.method == "POST":
-        settings_dict = {
-            "proxy": request.form.get("proxy"),
-            "update_url": request.form.get("update_url"),
-            "username": request.form.get("username"),
-            "password": request.form.get("password"),
-        }
-        saveSettingsForm(settings_dict)
-        flash("Settings updated successfully", "success")
-        return redirect("/settings")
-
-    current_settings = getSettings()
-    return render_template("settings.html", settings=current_settings)
-
-
-default_mac_info = {"expiry": None, "stats": {"playtime": 0, "errors": 0, "requests": 0}}
+defaultSettings = {
+    "stream method": "ffmpeg",
+    "ffmpeg command": "-re -http_proxy <proxy> -timeout <timeout> -i <url> -map 0 -codec copy -f mpegts -flush_packets 0 -fflags +nobuffer -flags low_delay -strict experimental -analyzeduration 0 -probesize 32 -copyts -threads 12 pipe:",
+    "ffmpeg timeout": "5",
+    "test streams": "true",
+    "try all macs": "true",
+    "use channel genres": "true",
+    "use channel numbers": "true",
+    "sort playlist by channel genre": "false",
+    "sort playlist by channel number": "true",
+    "sort playlist by channel name": "false",
+    "enable security": "false",
+    "username": "admin",
+    "password": "12345",
+    "enable hdhr": "true",
+    "hdhr name": "MacReplayV2",
+    "hdhr id": str(uuid.uuid4().hex),
+    "hdhr tuners": "10",
+}
 
 defaultPortal = {
     "enabled": "true",
     "name": "",
     "url": "",
-    "macs": defaultdict(lambda: copy.deepcopy(default_mac_info)),
+    "macs": {},
     "streams per mac": "1",
-    "epgTimeOffset": "0",
+    "epg offset": "0",
     "proxy": "",
     "enabled channels": [],
     "custom channel names": {},
     "custom channel numbers": {},
     "custom genres": {},
     "custom epg ids": {},
-    "catchup type": "stalker",
-    "catchup days": "7",
-    "custom cmd": "",
-    "user agent": "",
-    "timeout": "10",
-    "buffer size": "1024",
-    "max connections": "3",
+    "fallback channels": {},
 }
 
-def test_mac_addresses(url, portal_proxy, macs_to_test, portal_name, time_zone):
-    valid_macs = []
-    dead_macs = []
 
-    logger.info(
-        f"Testing MAC addresses for Portal({portal_name}) with URL({url}) and proxy({portal_proxy})"
-    )
+def loadConfig():
+    """Load configuration and normalize portal IDs so that
+    the portal ID (dictionary key) always matches the portal name.
+    """
+    try:
+        with open(configFile) as f:
+            data = json.load(f)
+    except Exception:
+        logger.warning("No existing config found. Creating a new one")
+        data = {}
 
-    for mac in macs_to_test:
-        try:
-            logger.info(f"Testing MAC({mac}) for Portal({portal_name})")
-            result = stb.getProfile(url, mac, portal_proxy, time_zone)
+    data.setdefault("portals", {})
+    data.setdefault("settings", {})
 
-            if result and "success" in result:
-                expiry = result.get("expiry", None)
-                if expiry:
-                    expiry_date = parse(expiry).replace(tzinfo=timezone.utc)
-                else:
-                    expiry_date = None
+    # Normalise settings
+    settings = data["settings"]
+    settingsOut = {}
 
-                valid_macs.append({"mac": mac, "expiry": expiry_date})
-            else:
-                logger.info(f"MAC({mac}) for Portal({portal_name}) is dead")
-                dead_macs.append(mac)
+    for setting, default in defaultSettings.items():
+        value = settings.get(setting)
+        if not value or type(default) != type(value):
+            value = default
+        settingsOut[setting] = value
 
-        except Exception as e:
-            logger.error(f"Error testing MAC({mac}) for Portal({portal_name}): {e}")
-            dead_macs.append(mac)
+    data["settings"] = settingsOut
 
-    return valid_macs, dead_macs
+    # Normalise portals and migrate IDs -> use portal name as key
+    portals = data["portals"]
+    portalsOut = {}
+
+    for old_id, portal_data in portals.items():
+        name_value = portal_data.get("name") or old_id
+        new_id = str(name_value)
+
+        portalsOut[new_id] = {}
+        for setting, default in defaultPortal.items():
+            value = portal_data.get(setting)
+            if not value or type(default) != type(value):
+                value = default
+            portalsOut[new_id][setting] = value
+
+        portalsOut[new_id]["name"] = new_id
+
+    data["portals"] = portalsOut
+
+    with open(configFile, "w") as f:
+        json.dump(data, f, indent=4)
+
+    return data
 
 
-def portal_update_macs(portal, macs=None, retest=False):
-    # Retrieve old MAC addresses from portal
-    old_macs_dict = portal["macs"]
-    
-    old_macs_set = set(old_macs_dict.keys() if old_macs_dict else [])
-    new_macs_set = set(macs if macs else [])
-    common_macs = list(new_macs_set & old_macs_set)     # Intersection of new_macs and old_macs
-    unique_new_macs = list(new_macs_set - old_macs_set) # Difference: new_macs - old_macs
+def getPortals():
+    return config["portals"]
 
-    # Determine MACs to test based on retest flag and new_macs input
-    if retest:
-        # If retest is True, test both old and any new MACs if provided
-        macs_to_test = common_macs + unique_new_macs
-        common_macs = []
+
+def savePortals(portals):
+    with open(configFile, "w") as f:
+        config["portals"] = portals
+        json.dump(config, f, indent=4)
+
+
+def getSettings():
+    return config["settings"]
+
+
+def saveSettings(settings):
+    with open(configFile, "w") as f:
+        config["settings"] = settings
+        json.dump(config, f, indent=4)
+
+
+def authorise(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        settings = getSettings()
+        security = settings["enable security"]
+        username = settings["username"]
+        password = settings["password"]
+        if (
+            security == "false"
+            or auth
+            and auth.username == username
+            and auth.password == password
+        ):
+            return f(*args, **kwargs)
+
+        return make_response(
+            "Could not verify your login!",
+            401,
+            {"WWW-Authenticate": 'Basic realm="Login Required"'},
+        )
+
+    return decorated
+
+
+def moveMac(portalId, mac):
+    portals = getPortals()
+    macs = portals[portalId]["macs"]
+    x = macs[mac]
+    del macs[mac]
+    macs[mac] = x
+    portals[portalId]["macs"] = macs
+    savePortals(portals)
+
+
+# Hilfsfunktion: MACs robust aus String / Liste parsen
+def parse_macs_input(raw_macs, from_json=False):
+    import re
+
+    mac_list = []
+
+    if from_json and isinstance(raw_macs, list):
+        parts = raw_macs
     else:
-        # Only test new MACs if retest is False
-        macs_to_test = unique_new_macs
-        
-    if not macs_to_test:
-        # No MACs to test, exit function
-        logger.info(f"No new MAC addresses in Portal({portal['name']}) found")
-        flash(f"No new MAC addresses in Portal({portal['name']}) found", "warning")
+        if raw_macs is None:
+            raw_macs = ""
+        parts = str(raw_macs).replace("\r", "").replace("\n", ",").split(",")
 
-    # Test MAC addresses
-    valid_macs, dead_macs = test_mac_addresses(portal["url"], portal["proxy"], macs_to_test, portal["name"], portal["time_zone"])
-    if old_macs_dict:
-        for mac, data in old_macs_dict.items():
-            if mac in common_macs and mac not in valid_macs:
-                valid_macs.append({'mac': mac, 'expiry': data['expiry']})
-            if mac in dead_macs:
-                logger.info(f"Dead MAC({mac}) for Portal({portal['name']}) has been removed.")
-                flash(f"Dead MAC({mac}) for Portal({portal['name']}) has been removed.", "success")
-            
-    # Initialize mac info structure and process results
-    macsout = defaultdict(lambda: copy.deepcopy(default_mac_info))
-
-    for entry in valid_macs:
-        mac = entry["mac"]
-        expiry = entry["expiry"] 
-
-        if mac in old_macs_dict:
-            # Keep stats for existing MACs and update expiry date
-            macsout[mac] = old_macs_dict[mac]
-            macsout[mac]["expiry"] = expiry
-            if mac in unique_new_macs:
-                logger.info(f"Successfully updated MAC({mac}) for Portal({portal['name']})")
-                flash(f"Successfully updated MAC({mac}) for Portal({portal['name']})", "success")
+    for part in parts:
+        m = str(part).strip().upper()
+        if not m:
+            continue
+        m = m.replace("-", ":")
+        m = re.sub(r"[^0-9A-F:]", "", m)
+        if ":" not in m and len(m) == 12:
+            m = ":".join(m[i : i + 2] for i in range(0, 12, 2))
+        if re.match(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$", m):
+            mac_list.append(m)
         else:
-            # Add new MAC address with blank stats
-            macsout[mac]["expiry"] = expiry
-            logger.info(f"Successfully added MAC({mac}) to Portal({portal['name']})")
-            flash(f"Successfully added MAC({mac}) to Portal({portal['name']})", "success")
+            logger.warning(f"Invalid MAC format ignored: '{part}' -> '{m}'")
 
-    # Update the portal's MAC list
-    portal["macs"] = macsout
+    seen = set()
+    uniq = []
+    for m in mac_list:
+        if m not in seen:
+            seen.add(m)
+            uniq.append(m)
+    return uniq
 
-    return portal
+
+@app.route("/", methods=["GET"])
+@authorise
+def home():
+    return redirect("/portals", code=302)
+
+
+@app.route("/portals", methods=["GET"])
+@authorise
+def portals():
+    """Portalliste inkl. MACs & Expiry aufbereitet für das Template."""
+    portals_raw = getPortals()
+    now = datetime.now(timezone.utc)
+    portals_view = {}
+
+    for portal_id, portal in portals_raw.items():
+        macs = portal.get("macs", {})
+        macs_list = []
+
+        for mac, expiry in macs.items():
+            expired = False
+            exp_str = str(expiry)
+            exp_dt = None
+
+            try:
+                if isinstance(expiry, (int, float)):
+                    exp_dt = datetime.fromtimestamp(float(expiry), timezone.utc)
+                else:
+                    s = str(expiry).strip()
+                    # einige mögliche Formate
+                    for fmt in (
+                        "%Y-%m-%d",
+                        "%Y-%m-%d %H:%M:%S",
+                        "%d.%m.%Y",
+                        "%d.%m.%Y %H:%M",
+                        "%Y/%m/%d",
+                    ):
+                        try:
+                            exp_dt = datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+                            break
+                        except ValueError:
+                            continue
+            except Exception:
+                exp_dt = None
+
+            if exp_dt and exp_dt < now:
+                expired = True
+
+            macs_list.append(
+                {
+                    "mac": mac,
+                    "expiry": exp_str,
+                    "expired": expired,
+                }
+            )
+
+        portal_copy = dict(portal)
+        portal_copy["macs_list"] = macs_list
+        portals_view[portal_id] = portal_copy
+
+    return render_template("portals.html", portals=portals_view)
 
 
 @app.route("/portal/add", methods=["POST"])
 @authorise
-def portals_add():
+def portalsAdd():
     """
-    Adds a new portal configuration.
-    Accepts both classic HTML form posts and JSON (AJAX) requests.
+    Portal hinzufügen.
+    - Unterstützt HTML-Form (redirect)
+    - und JSON (saubere JSON-Antwort -> kein 'Unexpected token <' mehr).
     """
-    # Accept both JSON (AJAX) and classic form submits
-    if request.is_json:
+    global cached_xmltv
+    cached_xmltv = None
+
+    is_json = request.is_json
+    if is_json:
         data = request.get_json(silent=True) or {}
-        name = data.get("name")
-        url = data.get("url")
-        proxy = data.get("proxy")
-        streams_per_mac = data.get("streams per mac") or data.get("streams_per_mac")
-        epg_time_offset = data.get("epg time offset") or data.get("epgTimeOffset")
-        time_zone = data.get("time_zone")
-        macs = data.get("macs") or []
+        name = (data.get("name") or "").strip()
+        url = (data.get("url") or "").strip()
+        proxy = (data.get("proxy") or "").strip()
+        streamsPerMac = str(data.get("streams_per_mac") or data.get("streams per mac") or "1")
+        epgOffset = str(data.get("epg_offset") or data.get("epg offset") or "0")
+        raw_macs = data.get("macs") or []
+        macs = parse_macs_input(raw_macs, from_json=True)
     else:
-        name = request.form.get("name")
-        url = request.form.get("url")
-        proxy = request.form.get("proxy")
-        streams_per_mac = request.form.get("streams per mac")
-        epg_time_offset = request.form.get("epg time offset")
-        time_zone = request.form.get("time_zone")
+        name = request.form.get("name", "").strip()
+        url = request.form.get("url", "").strip()
+        proxy = request.form.get("proxy", "").strip()
+        streamsPerMac = request.form.get("streams per mac", "1")
+        epgOffset = request.form.get("epg offset", "0")
+        raw_macs = request.form.get("macs", "")
+        macs = parse_macs_input(raw_macs)
 
-        # Try multiple possible field names for MACs in the HTML form
-        macs_data = (
-            request.form.get("macs")
-            or request.form.get("macs[]")
-            or request.form.get("mac")
-            or request.form.get("mac_addresses")
-            or ""
-        )
-
-        macs = []
-
-        # 1) Try to interpret macs_data as JSON (e.g. ["AA:BB:CC:DD:EE:FF"])
-        try:
-            parsed = json.loads(macs_data)
-            if isinstance(parsed, list):
-                macs = parsed
-            elif isinstance(parsed, str):
-                macs_data = parsed
-        except Exception:
-            # Not JSON, fall back to plain text parsing below
-            pass
-
-        # 2) If still empty, treat as plain text (textarea):
-        #    allow separators like newlines, commas, semicolons
-        if not macs and isinstance(macs_data, str):
-            tmp = macs_data.replace("\r", "\n")
-            for sep in [",", ";"]:
-                tmp = tmp.replace(sep, "\n")
-            macs = [m.strip() for m in tmp.split("\n") if m.strip()]
+    enabled = "true"
 
     logger.info(f"Add portal request: name={name}, url={url}, macs={macs}")
 
-    # Normalize MACs list
-    if isinstance(macs, str):
-        tmp = macs.replace("\r", "\n")
-        for sep in [",", ";"]:
-            tmp = tmp.replace(sep, "\n")
-        macs = [m.strip() for m in tmp.split("\n") if m.strip()]
-
-    macs = [m.strip().upper() for m in macs if isinstance(m, str) and m.strip()]
-
-    # Check name, url and macs
     if not name or not url or not macs:
-        error_message = "Can't add Portal. Name, URL and MACs are required"
-        logger.error(error_message)
-        return jsonify({"error": error_message}), 400
+        msg = "Name, URL und mindestens eine gültige MAC-Adresse sind erforderlich."
+        logger.error(
+            f"Can't add Portal. Name, URL and MACs are required (name={name}, url={url}, macs_parsed={macs})"
+        )
+        if is_json:
+            return jsonify({"success": False, "error": msg}), 400
+        flash(msg, "danger")
+        return redirect("/portals", code=302)
 
-    # Validate and retrieve the URL
+    # URL ggf. auflösen
     if not url.endswith(".php"):
-        url = stb.getUrl(url, proxy)
-        if not url:
-            error_message = f"Error getting URL for Portal({name})"
-            logger.error(error_message)
-            return jsonify({"error": error_message}), 400
+        resolved = stb.getUrl(url, proxy)
+        if not resolved:
+            logger.error("Error getting URL for Portal({})".format(name))
+            msg = f"Fehler beim Ermitteln der Portal-URL für ({name})"
+            if is_json:
+                return jsonify({"success": False, "error": msg}), 400
+            flash(msg, "danger")
+            return redirect("/portals", code=302)
+        url = resolved
 
-    # Create new Portal
-    portal = {
-        "enabled": "true",
-        "name": name,
-        "url": url,
-        # Initialize MACs as a dict with default stats structure
-        "macs": defaultdict(lambda: copy.deepcopy(default_mac_info)),
-        "streams per mac": streams_per_mac,
-        "epgTimeOffset": epg_time_offset,
-        "time_zone": time_zone,
-        "proxy": proxy,
-    }
-    # Add MACs
-    portal = portal_update_macs(portal, macs=macs)
+    macsd = {}
+    for mac in macs:
+        logger.info(
+            f"Testing MAC({mac}) for Portal({name}) via URL {url} (proxy={proxy or 'none'})"
+        )
+        token = stb.getToken(url, mac, proxy)
+        if token:
+            stb.getProfile(url, mac, token, proxy)
+            expiry = stb.getExpires(url, mac, token, proxy)
+            if expiry:
+                macsd[mac] = expiry
+                logger.info(
+                    "Successfully tested MAC({}) for Portal({}) – expiry: {}".format(
+                        mac, name, expiry
+                    )
+                )
+                if not is_json:
+                    flash(
+                        "Successfully tested MAC({}) for Portal({})".format(mac, name),
+                        "success",
+                    )
+                continue
 
-    # Add Default settings
-    for setting, default in defaultPortal.items():
-        if setting not in portal:
-            portal[setting] = default
+        logger.error("Error testing MAC({}) for Portal({})".format(mac, name))
+        if not is_json:
+            flash("Error testing MAC({}) for Portal({})".format(mac, name), "danger")
 
-    if len(portal["macs"]) > 0:
-        # Save new portal
-        portals = getPortals()
-        portals[uuid.uuid4().hex] = portal
-        savePortals(portals)
-        
-        logger.info(f"Portal({portal['name']}) added!")
-        return jsonify({"success": f"Portal({portal['name']}) successfully added!"}), 200
-    else:
-        error_message = f"None of the MACs tested OK for Portal({name}). Adding not successful"
-        logger.error(error_message)
-        return jsonify({"error": error_message}), 400
-
-
-@app.route("/portal/checkmacs", methods=["POST"])
-@authorise
-def portal_checkmacs():
-    if request.is_json:
-        # Handling the JSON (AJAX) request
-        data = request.get_json()
-        id = data.get("id")
-        name = data.get("name")
-        url = data.get("url")
-        proxy = data.get("proxy")
-        time_zone = data.get("time_zone")
-        macs = data.get("macs", [])
-    else:
-        # Handling the regular form submission
-        id = request.form.get("id")
-        name = request.form.get("name")
-        url = request.form.get("url")
-        proxy = request.form.get("proxy")
-        time_zone = request.form.get("time_zone")
-        macs = request.form.get("macs", "").split(",")
-
-    logger.info(f"Check MACs request for portal ID={id}, name={name}, URL={url}, MACs={macs}")
-
-    portals = getPortals()
-
-    if id == "new":
+    if len(macsd) > 0:
         portal = {
-            "enabled": "true",
+            "enabled": enabled,
             "name": name,
             "url": url,
-            "macs": defaultdict(lambda: copy.deepcopy(default_mac_info)),
-            "streams per mac": "1",
-            "epgTimeOffset": "0",
-            "time_zone": time_zone,
+            "macs": macsd,
+            "streams per mac": streamsPerMac,
+            "epg offset": epgOffset,
             "proxy": proxy,
         }
-    else:
-        portal = portals.get(id)
-        if not portal:
-            logger.error(f"No portal found with ID({id})")
-            return jsonify({"error": f"No portal found with ID({id})"}), 404
 
-        portal["name"] = name
-        portal["url"] = url
-        portal["proxy"] = proxy
-        portal["time_zone"] = time_zone
+        for setting, default in defaultPortal.items():
+            if setting not in portal or portal.get(setting) in (None, ""):
+                portal[setting] = default
 
-    # Update MAC addresses in the portal
-    portal = portal_update_macs(portal, macs=macs if id == "new" else None, retest=id != "new")
-
-    # Return updated portal data as JSON
-    return jsonify({"success": True, "portal": portal}), 200
-
-
-@app.route("/portal/<id>/delete", methods=["POST"])
-@authorise
-def portal_delete(id):
-    portals = getPortals()
-    if id in portals:
-        del portals[id]
+        portals = getPortals()
+        portals[name] = portal  # ID == Name
         savePortals(portals)
-        flash("Portal deleted successfully", "success")
+        logger.info("Portal({}) added!".format(portal["name"]))
+
+        if is_json:
+            return jsonify({"success": True, "portal": {"id": name, "name": name}}), 200
+        else:
+            return redirect("/portals", code=302)
+
     else:
-        flash("Portal not found", "danger")
-    return redirect("/")
+        logger.error(
+            "None of the MACs tested OK for Portal({}). Adding not successfull".format(
+                name
+            )
+        )
+        msg = (
+            "Keine der MACs für Portal({}) ist gültig / aktiv. "
+            "Portal wurde nicht hinzugefügt.".format(name)
+        )
+        if is_json:
+            return jsonify({"success": False, "error": msg}), 400
+        flash(msg, "danger")
+        return redirect("/portals", code=302)
 
 
-@app.route("/portal/<id>/enable", methods=["POST"])
+@app.route("/portal/update", methods=["POST"])
 @authorise
-def portal_enable(id):
+def portalUpdate():
+    """
+    Portal aktualisieren.
+    - Unterstützt HTML-Form (redirect)
+    - und JSON (saubere JSON-Antwort).
+    """
+    global cached_xmltv
+    cached_xmltv = None
+
+    is_json = request.is_json
+    if is_json:
+        data = request.get_json(silent=True) or {}
+        old_id = (data.get("id") or "").strip()
+        enabled = "true" if data.get("enabled") in (True, "true", "1") else "false"
+        new_name = (data.get("name") or "").strip()
+        url = (data.get("url") or "").strip()
+        proxy = (data.get("proxy") or "").strip()
+        streamsPerMac = str(data.get("streams_per_mac") or data.get("streams per mac") or "1")
+        epgOffset = str(data.get("epg_offset") or data.get("epg offset") or "0")
+        raw_macs = data.get("macs") or []
+        retest = data.get("retest")
+        macs = parse_macs_input(raw_macs, from_json=True)
+    else:
+        old_id = request.form.get("id", "").strip()
+        enabled = request.form.get("enabled", "false")
+        new_name = request.form.get("name", "").strip()
+        url = request.form.get("url", "").strip()
+        proxy = request.form.get("proxy", "").strip()
+        streamsPerMac = request.form.get("streams per mac", "1")
+        epgOffset = request.form.get("epg offset", "0")
+        raw_macs = request.form.get("macs", "")
+        retest = request.form.get("retest", None)
+        macs = parse_macs_input(raw_macs)
+
     portals = getPortals()
-    if id in portals:
-        portals[id]["enabled"] = "true"
+    portal_entry = portals.get(old_id)
+    if not portal_entry:
+        msg = "Portal nicht gefunden."
+        logger.error(f"PortalUpdate: portal with id '{old_id}' not found")
+        if is_json:
+            return jsonify({"success": False, "error": msg}), 404
+        flash(msg, "danger")
+        return redirect("/portals", code=302)
+
+    if not new_name or not url or not macs:
+        msg = "Name, URL und mindestens eine gültige MAC-Adresse sind erforderlich."
+        logger.error(
+            f"Can't update Portal. Name, URL and MACs are required "
+            f"(name={new_name}, url={url}, macs_parsed={macs})"
+        )
+        if is_json:
+            return jsonify({"success": False, "error": msg}), 400
+        flash(msg, "danger")
+        return redirect("/portals", code=302)
+
+    if not url.endswith(".php"):
+        resolved = stb.getUrl(url, proxy)
+        if not resolved:
+            logger.error("Error getting URL for Portal({})".format(new_name))
+            msg = f"Fehler beim Ermitteln der Portal-URL für ({new_name})"
+            if is_json:
+                return jsonify({"success": False, "error": msg}), 400
+            flash(msg, "danger")
+            return redirect("/portals", code=302)
+        url = resolved
+
+    oldmacs = portal_entry.get("macs", {})
+    macsout = {}
+    deadmacs = []
+
+    for mac in macs:
+        logger.info(f"PortalUpdate: checking MAC({mac}) for Portal({new_name})")
+        if retest or mac not in oldmacs.keys():
+            token = stb.getToken(url, mac, proxy)
+            if token:
+                stb.getProfile(url, mac, token, proxy)
+                expiry = stb.getExpires(url, mac, token, proxy)
+                if expiry:
+                    macsout[mac] = expiry
+                    logger.info(
+                        "Successfully tested MAC({}) for Portal({})".format(
+                            mac, new_name
+                        )
+                    )
+                    if not is_json:
+                        flash(
+                            "Successfully tested MAC({}) for Portal({})".format(
+                                mac, new_name
+                            ),
+                            "success",
+                        )
+
+            if mac not in list(macsout.keys()):
+                deadmacs.append(mac)
+
+        if mac in oldmacs.keys() and mac not in deadmacs:
+            macsout[mac] = oldmacs[mac]
+
+        if mac not in macsout.keys():
+            logger.error(
+                "Error testing MAC({}) for Portal({})".format(mac, new_name)
+            )
+            if not is_json:
+                flash(
+                    "Error testing MAC({}) for Portal({})".format(mac, new_name),
+                    "danger",
+                )
+
+    if len(macsout) > 0:
+        portal_entry["enabled"] = enabled
+        portal_entry["name"] = new_name
+        portal_entry["url"] = url
+        portal_entry["macs"] = macsout
+        portal_entry["streams per mac"] = streamsPerMac
+        portal_entry["epg offset"] = epgOffset
+        portal_entry["proxy"] = proxy
+
+        new_id = new_name
+        if new_id != old_id:
+            portals.pop(old_id, None)
+        portals[new_id] = portal_entry
+
         savePortals(portals)
-        flash("Portal enabled successfully", "success")
+        logger.info("Portal({}) updated!".format(new_name))
+        if is_json:
+            return jsonify({"success": True, "portal": {"id": new_id, "name": new_name}}), 200
+        flash("Portal({}) updated!".format(new_name), "success")
+        return redirect("/portals", code=302)
     else:
-        flash("Portal not found", "danger")
-    return redirect("/")
+        logger.error(
+            "None of the MACs tested OK for Portal({}). Updating not successfull".format(
+                new_name
+            )
+        )
+        msg = (
+            "Keine der MACs konnte erfolgreich getestet werden. "
+            "Portal wurde nicht aktualisiert."
+        )
+        if is_json:
+            return jsonify({"success": False, "error": msg}), 400
+        flash(msg, "danger")
+        return redirect("/portals", code=302)
 
 
-@app.route("/portal/<id>/disable", methods=["POST"])
+@app.route("/portal/remove", methods=["POST"])
 @authorise
-def portal_disable(id):
+def portalRemove():
+    id = request.form["deleteId"]
     portals = getPortals()
-    if id in portals:
-        portals[id]["enabled"] = "false"
-        savePortals(portals)
-        flash("Portal disabled successfully", "success")
-    else:
-        flash("Portal not found", "danger")
-    return redirect("/")
-
-
-@app.route("/portal/<id>/edit", methods=["GET", "POST"])
-@authorise
-def portal_edit(id):
-    portals = getPortals()
-    portal = portals.get(id)
-
-    if not portal:
-        flash("Portal not found", "danger")
-        return redirect("/")
-
-    if request.method == "POST":
-        portal["name"] = request.form.get("name")
-        portal["url"] = request.form.get("url")
-        portal["proxy"] = request.form.get("proxy")
-        portal["time_zone"] = request.form.get("time_zone")
-        savePortals(portals)
-        flash("Portal updated successfully", "success")
-        return redirect("/")
-
-    return render_template("portal_edit.html", id=id, portal=portal)
-
-
-@app.route("/portal/<id>/stats", methods=["GET"])
-@authorise
-def portal_stats(id):
-    portals = getPortals()
-    portal = portals.get(id)
-    if not portal:
-        flash("Portal not found", "danger")
-        return redirect("/")
-
-    macs = portal.get("macs", {})
-    return render_template("portal_stats.html", id=id, portal=portal, macs=macs)
-
-
-@app.route("/portal/<id>/macs/<mac>/reset", methods=["POST"])
-@authorise
-def reset_mac_stats(id, mac):
-    portals = getPortals()
-    portal = portals.get(id)
-
-    if not portal:
-        flash("Portal not found", "danger")
-        return redirect("/")
-
-    if mac in portal["macs"]:
-        portal["macs"][mac]["stats"] = {"playtime": 0, "errors": 0, "requests": 0}
-        savePortals(portals)
-        flash(f"Stats for MAC({mac}) reset successfully", "success")
-    else:
-        flash("MAC address not found", "danger")
-
-    return redirect(url_for("portal_stats", id=id))
-
-
-@app.route("/portal/<id>/macs/<mac>/delete", methods=["POST"])
-@authorise
-def delete_mac(id, mac):
-    portals = getPortals()
-    portal = portals.get(id)
-
-    if not portal:
-        flash("Portal not found", "danger")
-        return redirect("/")
-
-    if mac in portal["macs"]:
-        del portal["macs"][mac]
-        savePortals(portals)
-        flash(f"MAC({mac}) deleted successfully", "success")
-    else:
-        flash("MAC address not found", "danger")
-
-    return redirect(url_for("portal_stats", id=id))
-
-
-@app.route("/portal/<id>/macs/<mac>/update_expiry", methods=["POST"])
-@authorise
-def update_mac_expiry(id, mac):
-    portals = getPortals()
-    portal = portals.get(id)
-
-    if not portal:
-        flash("Portal not found", "danger")
-        return redirect("/")
-
-    new_expiry = request.form.get("expiry")
-
-    if mac in portal["macs"]:
-        try:
-            new_expiry_date = parse(new_expiry).replace(tzinfo=timezone.utc)
-            portal["macs"][mac]["expiry"] = new_expiry_date
-            savePortals(portals)
-            flash(f"Expiry date for MAC({mac}) updated successfully", "success")
-        except Exception as e:
-            flash(f"Invalid expiry date format: {e}", "danger")
-    else:
-        flash("MAC address not found", "danger")
-
-    return redirect(url_for("portal_stats", id=id))
-
-
-@app.route("/update_portal", methods=["POST"])
-@authorise
-def update_portal():
-    data = request.get_json()
-    id = data.get("id")
-    new_data = data.get("portal")
-    portals = getPortals()
-
-    if id in portals:
-        portals[id].update(new_data)
-        savePortals(portals)
-        return jsonify({"success": True}), 200
-    else:
-        return jsonify({"error": "Portal not found"}), 404
-
-# Proxy and streaming routes (unchanged logic)...
-
-@app.route("/play/<portal_id>/<mac>/<cmd>/<int:channel_id>")
-def play_channel(portal_id, mac, cmd, channel_id):
-    portals = getPortals()
-    portal = portals.get(portal_id)
-
-    if not portal:
-        return "Portal not found", 404
-
-    mac_info = portal["macs"].get(mac.upper())
-    if not mac_info:
-        return "MAC address not found", 404
-
-    url = portal["url"]
-    proxy = portal.get("proxy")
-    time_zone = portal.get("time_zone")
-    user_agent = portal.get("user agent", "")
-    timeout = int(portal.get("timeout", "10"))
-    bufferSize = int(portal.get("buffer size", "1024"))
-
-    # Update stats
-    mac_info["stats"]["requests"] += 1
+    name = portals[id]["name"]
+    del portals[id]
     savePortals(portals)
+    logger.info("Portal ({}) removed!".format(name))
+    flash("Portal ({}) removed!".format(name), "success")
+    return redirect("/portals", code=302)
 
-    def generate():
-        with lock:
+
+@app.route("/editor", methods=["GET"])
+@authorise
+def editor():
+    return render_template("editor.html")
+
+
+@app.route("/editor_data", methods=["GET"])
+@authorise
+def editor_data():
+    channels = []
+    portals = getPortals()
+    for portal in portals:
+        logger.info(f"getting Data from {portal}")
+        if portals[portal]["enabled"] == "true":
+            portalName = portals[portal]["name"]
+            url = portals[portal]["url"]
+            macs = list(portals[portal]["macs"].keys())
+            proxy = portals[portal]["proxy"]
+            enabledChannels = portals[portal].get("enabled channels", [])
+            customChannelNames = portals[portal].get("custom channel names", {})
+            customGenres = portals[portal].get("custom genres", {})
+            customChannelNumbers = portals[portal].get("custom channel numbers", {})
+            customEpgIds = portals[portal].get("custom epg ids", {})
+            fallbackChannels = portals[portal].get("fallback channels", {})
+
+            for mac in macs:
+                logger.info(f"Using mac: {mac}")
+                try:
+                    token = stb.getToken(url, mac, proxy)
+                    stb.getProfile(url, mac, token, proxy)
+                    allChannels = stb.getAllChannels(url, mac, token, proxy)
+                    genres = stb.getGenreNames(url, mac, token, proxy)
+                    break
+                except Exception:
+                    allChannels = None
+                    genres = None
+
+            if allChannels and genres:
+                for channel in allChannels:
+                    channelId = str(channel["id"])
+                    channelName = str(channel["name"])
+                    channelNumber = str(channel["number"])
+                    genre = str(genres.get(str(channel["tv_genre_id"])))
+                    enabled = channelId in enabledChannels
+                    customChannelNumber = customChannelNumbers.get(channelId) or ""
+                    customChannelName = customChannelNames.get(channelId) or ""
+                    customGenre = customGenres.get(channelId) or ""
+                    customEpgId = customEpgIds.get(channelId) or ""
+                    fallbackChannel = fallbackChannels.get(channelId) or ""
+                    channels.append(
+                        {
+                            "portal": portal,
+                            "portalName": portalName,
+                            "enabled": enabled,
+                            "channelNumber": channelNumber,
+                            "customChannelNumber": customChannelNumber,
+                            "channelName": channelName,
+                            "customChannelName": customChannelName,
+                            "genre": genre,
+                            "customGenre": customGenre,
+                            "channelId": channelId,
+                            "customEpgId": customEpgId,
+                            "fallbackChannel": fallbackChannel,
+                            "link": "http://"
+                            + host
+                            + "/play/"
+                            + portal
+                            + "/"
+                            + channelId
+                            + "?web=true",
+                        }
+                    )
+            else:
+                logger.error(
+                    "Error getting channel data for {}, skipping".format(portalName)
+                )
+                flash(
+                    "Error getting channel data for {}, skipping".format(portalName),
+                    "danger",
+                )
+
+    data = {"data": channels}
+    return flask.jsonify(data)
+
+
+@app.route("/editor/save", methods=["POST"])
+@authorise
+def editorSave():
+    global cached_xmltv, last_playlist_host
+    threading.Thread(target=refresh_xmltv, daemon=True).start()
+    last_playlist_host = None
+    Thread(target=refresh_lineup).start()
+
+    enabledEdits = json.loads(request.form["enabledEdits"])
+    numberEdits = json.loads(request.form["numberEdits"])
+    nameEdits = json.loads(request.form["nameEdits"])
+    genreEdits = json.loads(request.form["genreEdits"])
+    epgEdits = json.loads(request.form["epgEdits"])
+    fallbackEdits = json.loads(request.form["fallbackEdits"])
+    portals = getPortals()
+
+    for edit in enabledEdits:
+        portal = edit["portal"]
+        channelId = edit["channel id"]
+        enabled = edit["enabled"]
+        if enabled:
+            portals[portal].setdefault("enabled channels", [])
+            if channelId not in portals[portal]["enabled channels"]:
+                portals[portal]["enabled channels"].append(channelId)
+        else:
+            portals[portal]["enabled channels"] = list(
+                filter((channelId).__ne__, portals[portal]["enabled channels"])
+            )
+
+    for edit in numberEdits:
+        portal = edit["portal"]
+        channelId = edit["channel id"]
+        customNumber = edit["custom number"]
+        if customNumber:
+            portals[portal].setdefault("custom channel numbers", {})
+            portals[portal]["custom channel numbers"].update({channelId: customNumber})
+        else:
+            portals[portal]["custom channel numbers"].pop(channelId, None)
+
+    for edit in nameEdits:
+        portal = edit["portal"]
+        channelId = edit["channel id"]
+        customName = edit["custom name"]
+        if customName:
+            portals[portal].setdefault("custom channel names", {})
+            portals[portal]["custom channel names"].update({channelId: customName})
+        else:
+            portals[portal]["custom channel names"].pop(channelId, None)
+
+    for edit in genreEdits:
+        portal = edit["portal"]
+        channelId = edit["channel id"]
+        customGenre = edit["custom genre"]
+        if customGenre:
+            portals[portal].setdefault("custom genres", {})
+            portals[portal]["custom genres"].update({channelId: customGenre})
+        else:
+            portals[portal]["custom genres"].pop(channelId, None)
+
+    for edit in epgEdits:
+        portal = edit["portal"]
+        channelId = edit["channel id"]
+        customEpgId = edit["custom epg id"]
+        if customEpgId:
+            portals[portal].setdefault("custom epg ids", {})
+            portals[portal]["custom epg ids"].update({channelId: customEpgId})
+        else:
+            portals[portal]["custom epg ids"].pop(channelId, None)
+
+    for edit in fallbackEdits:
+        portal = edit["portal"]
+        channelId = edit["channel id"]
+        channelName = edit["channel name"]
+        if channelName:
+            portals[portal].setdefault("fallback channels", {})
+            portals[portal]["fallback channels"].update({channelId: channelName})
+        else:
+            portals[portal]["fallback channels"].pop(channelId, None)
+
+    savePortals(portals)
+    logger.info("Playlist config saved!")
+    flash("Playlist config saved!", "success")
+    return redirect("/editor", code=302)
+
+
+@app.route("/editor/reset", methods=["POST"])
+@authorise
+def editorReset():
+    portals = getPortals()
+    for portal in portals:
+        portals[portal]["enabled channels"] = []
+        portals[portal]["custom channel numbers"] = {}
+        portals[portal]["custom channel names"] = {}
+        portals[portal]["custom genres"] = {}
+        portals[portal]["custom epg ids"] = {}
+        portals[portal]["fallback channels"] = {}
+
+    savePortals(portals)
+    logger.info("Playlist reset!")
+    flash("Playlist reset!", "success")
+    return redirect("/editor", code=302)
+
+
+@app.route("/settings", methods=["GET"])
+@authorise
+def settings():
+    settings = getSettings()
+    return render_template(
+        "settings.html", settings=settings, defaultSettings=defaultSettings
+    )
+
+
+@app.route("/settings/save", methods=["POST"])
+@authorise
+def save():
+    settings = {}
+
+    for setting, _ in defaultSettings.items():
+        value = request.form.get(setting, "false")
+        settings[setting] = value
+
+    saveSettings(settings)
+    logger.info("Settings saved!")
+    Thread(target=refresh_xmltv).start()
+    flash("Settings saved!", "success")
+    return redirect("/settings", code=302)
+
+
+@app.route("/playlist.m3u", methods=["GET"])
+@authorise
+def playlist():
+    global cached_playlist, last_playlist_host
+
+    logger.info("Playlist Requested")
+
+    current_host = request.host or "0.0.0.0:8001"
+
+    if (
+        cached_playlist is None
+        or len(cached_playlist) == 0
+        or last_playlist_host != current_host
+    ):
+        logger.info(
+            f"Regenerating playlist due to host change: {last_playlist_host} -> {current_host}"
+        )
+        last_playlist_host = current_host
+        generate_playlist()
+
+    return Response(cached_playlist, mimetype="text/plain")
+
+
+@app.route("/m3u/<portalId>", methods=["GET"])
+@authorise
+def playlist_portal(portalId):
+    """Return a M3U playlist for a specific portal only. portalId == portal name."""
+    logger.info(f"Per-portal playlist requested for portalId='{portalId}'")
+
+    portals = getPortals()
+    if portalId not in portals:
+        logger.warning(f"Requested playlist for unknown portalId: {portalId}")
+        return Response("#EXTM3U\n", mimetype="text/plain")
+
+    portal_cfg = portals[portalId]
+    if portal_cfg.get("enabled") != "true":
+        logger.info(f"Requested playlist for disabled portalId: {portalId}")
+        return Response("#EXTM3U\n", mimetype="text/plain")
+
+    enabledChannels = portal_cfg.get("enabled channels", [])
+    if not enabledChannels:
+        logger.info(f"No enabled channels for portalId: {portalId}")
+        return Response("#EXTM3U\n", mimetype="text/plain")
+
+    playlist_host = request.host or "0.0.0.0:8001"
+
+    url = portal_cfg.get("url")
+    proxy = portal_cfg.get("proxy")
+    macs = list(portal_cfg.get("macs", {}).keys())
+    customChannelNames = portal_cfg.get("custom channel names", {})
+    customGenres = portal_cfg.get("custom genres", {})
+    customChannelNumbers = portal_cfg.get("custom channel numbers", {})
+    customEpgIds = portal_cfg.get("custom epg ids", {})
+
+    allChannels = None
+    genres = None
+
+    for mac in macs:
+        try:
+            token = stb.getToken(url, mac, proxy)
+            stb.getProfile(url, mac, token, proxy)
+            allChannels = stb.getAllChannels(url, mac, token, proxy)
+            genres = stb.getGenreNames(url, mac, token, proxy)
+            break
+        except Exception as e:
+            logger.warning(f"Failed to init portal {portalId} with MAC {mac}: {e}")
+            allChannels = None
+            genres = None
+
+    channels = []
+    if allChannels and genres:
+        for channel in allChannels:
+            channelId = str(channel.get("id"))
+            if channelId not in enabledChannels:
+                continue
+
+            channelName = customChannelNames.get(channelId) or str(channel.get("name"))
+            genreId = str(channel.get("tv_genre_id"))
+            genre = customGenres.get(channelId) or str(genres.get(genreId))
+            channelNumber = (
+                customChannelNumbers.get(channelId) or str(channel.get("number"))
+            )
+            epgId = customEpgIds.get(channelId) or channelName
+
+            line = '#EXTINF:-1 tvg-id="' + epgId + '"'
+            if getSettings().get("use channel numbers", "true") == "true":
+                line += f' tvg-chno="{channelNumber}"'
+            if getSettings().get("use channel genres", "true") == "true":
+                line += f' group-title="{genre}"'
+            line += ',"' + channelName + '"\n'
+            line += f"http://{playlist_host}/play/{portalId}/{channelId}"
+            channels.append(line)
+
+    if getSettings().get("sort playlist by channel name", "true") == "true":
+        channels.sort(key=lambda k: k.split(",")[1].split("\n")[0])
+    if getSettings().get("use channel numbers", "true") == "true":
+        if getSettings().get("sort playlist by channel number", "false") == "true":
+            channels.sort(key=lambda k: k.split('tvg-chno="')[1].split('"')[0])
+    if getSettings().get("use channel genres", "true") == "true":
+        if getSettings().get("sort playlist by channel genre", "false") == "true":
+            channels.sort(key=lambda k: k.split('group-title="')[1].split('"')[0])
+
+    playlist_str = "#EXTM3U \n" + "\n".join(channels)
+    return Response(playlist_str, mimetype="text/plain")
+
+
+@app.route("/update_playlistm3u", methods=["POST"])
+def update_playlistm3u():
+    generate_playlist()
+    return Response("Playlist updated successfully", status=200)
+
+
+def generate_playlist():
+    global cached_playlist
+    logger.info("Generating playlist.m3u...")
+
+    playlist_host = request.host or "0.0.0.0:8001"
+
+    channels = []
+    portals = getPortals()
+
+    for portal in portals:
+        if portals[portal]["enabled"] == "true":
+            enabledChannels = portals[portal].get("enabled channels", [])
+            if len(enabledChannels) != 0:
+                name = portals[portal]["name"]
+                url = portals[portal]["url"]
+                macs = list(portals[portal]["macs"].keys())
+                proxy = portals[portal]["proxy"]
+                customChannelNames = portals[portal].get("custom channel names", {})
+                customGenres = portals[portal].get("custom genres", {})
+                customChannelNumbers = portals[portal].get("custom channel numbers", {})
+                customEpgIds = portals[portal].get("custom epg ids", {})
+
+                for mac in macs:
+                    try:
+                        token = stb.getToken(url, mac, proxy)
+                        stb.getProfile(url, mac, token, proxy)
+                        allChannels = stb.getAllChannels(url, mac, token, proxy)
+                        genres = stb.getGenreNames(url, mac, token, proxy)
+                        break
+                    except Exception:
+                        allChannels = None
+                        genres = None
+
+                if allChannels and genres:
+                    for channel in allChannels:
+                        channelId = str(channel.get("id"))
+                        if channelId in enabledChannels:
+                            channelName = customChannelNames.get(channelId)
+                            if channelName is None:
+                                channelName = str(channel.get("name"))
+                            genre = customGenres.get(channelId)
+                            if genre is None:
+                                genreId = str(channel.get("tv_genre_id"))
+                                genre = str(genres.get(genreId))
+                            channelNumber = customChannelNumbers.get(channelId)
+                            if channelNumber is None:
+                                channelNumber = str(channel.get("number"))
+                            epgId = customEpgIds.get(channelId)
+                            if epgId is None:
+                                epgId = channelName
+                            channels.append(
+                                "#EXTINF:-1"
+                                + ' tvg-id="'
+                                + epgId
+                                + (
+                                    '" tvg-chno="' + channelNumber
+                                    if getSettings().get(
+                                        "use channel numbers", "true"
+                                    )
+                                    == "true"
+                                    else ""
+                                )
+                                + (
+                                    '" group-title="' + genre
+                                    if getSettings().get(
+                                        "use channel genres", "true"
+                                    )
+                                    == "true"
+                                    else ""
+                                )
+                                + '",'
+                                + channelName
+                                + "\n"
+                                + "http://"
+                                + playlist_host
+                                + "/play/"
+                                + portal
+                                + "/"
+                                + channelId
+                            )
+                else:
+                    logger.error("Error making playlist for {}, skipping".format(name))
+
+    if getSettings().get("sort playlist by channel name", "true") == "true":
+        channels.sort(key=lambda k: k.split(",")[1].split("\n")[0])
+    if getSettings().get("use channel numbers", "true") == "true":
+        if getSettings().get("sort playlist by channel number", "false") == "true":
+            channels.sort(key=lambda k: k.split('tvg-chno="')[1].split('"')[0])
+    if getSettings().get("use channel genres", "true") == "true":
+        if getSettings().get("sort playlist by channel genre", "false") == "true":
+            channels.sort(key=lambda k: k.split('group-title="')[1].split('"')[0])
+
+    playlist = "#EXTM3U \n" + "\n".join(channels)
+    cached_playlist = playlist
+    logger.info("Playlist generated and cached.")
+
+
+def refresh_xmltv():
+    settings = getSettings()
+    logger.info("Refreshing XMLTV...")
+
+    cache_dir = "/app/data"
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = os.path.join(cache_dir, "MacReplayV2EPG.xml")
+    legacy_cache_file = os.path.join(cache_dir, "MacReplayEPG.xml")
+    if not os.path.exists(cache_file) and os.path.exists(legacy_cache_file):
+        shutil.copy2(legacy_cache_file, cache_file)
+        logger.info(
+            "Legacy MacReplay EPG cache detected – migrated to MacReplayV2EPG.xml"
+        )
+
+    day_before_yesterday = datetime.now(timezone.utc) - timedelta(days=2)
+    day_before_yesterday_str = (
+        day_before_yesterday.strftime("%Y%m%d%H%M%S") + " +0000"
+    )
+
+    cached_programmes = []
+    if os.path.exists(cache_file):
+        try:
+            tree = ET.parse(cache_file)
+            root = tree.getroot()
+            for programme in root.findall("programme"):
+                stop_attr = programme.get("stop")
+                if stop_attr:
+                    try:
+                        stop_time = datetime.strptime(
+                            stop_attr.split(" ")[0], "%Y%m%d%H%M%S"
+                        ).replace(tzinfo=timezone.utc)
+                        if stop_time >= day_before_yesterday:
+                            cached_programmes.append(
+                                ET.tostring(programme, encoding="unicode")
+                            )
+                    except ValueError as e:
+                        logger.warning(
+                            f"Invalid stop time format in cached programme: {stop_attr}. Skipping."
+                        )
+            logger.info("Loaded existing programme data from cache.")
+        except Exception as e:
+            logger.error(f"Failed to load cache file: {e}")
+
+    channels = ET.Element("tv")
+    programmes = ET.Element("tv")
+    portals = getPortals()
+
+    for portal in portals:
+        if portals[portal]["enabled"] == "true":
+            portal_name = portals[portal]["name"]
+            portal_epg_offset = int(portals[portal]["epg offset"])
+            logger.info(
+                f"Fetching EPG | Portal: {portal_name} | offset: {portal_epg_offset} |"
+            )
+
+            enabledChannels = portals[portal].get("enabled channels", [])
+            if len(enabledChannels) != 0:
+                name = portals[portal]["name"]
+                url = portals[portal]["url"]
+                macs = list(portals[portal]["macs"].keys())
+                proxy = portals[portal]["proxy"]
+                customChannelNames = portals[portal].get("custom channel names", {})
+                customEpgIds = portals[portal].get("custom epg ids", {})
+                customChannelNumbers = portals[portal].get(
+                    "custom channel numbers", {}
+                )
+
+                for mac in macs:
+                    try:
+                        token = stb.getToken(url, mac, proxy)
+                        stb.getProfile(url, mac, token, proxy)
+                        allChannels = stb.getAllChannels(url, mac, token, proxy)
+                        epg = stb.getEpg(url, mac, token, 24, proxy)
+                        break
+                    except Exception as e:
+                        allChannels = None
+                        epg = None
+                        logger.error(f"Error fetching data for MAC {mac}: {e}")
+
+                if allChannels and epg:
+                    for channel in allChannels:
+                        try:
+                            channelId = str(channel.get("id"))
+                            if str(channelId) in enabledChannels:
+                                channelName = customChannelNames.get(
+                                    channelId, channel.get("name")
+                                )
+                                channelNumber = customChannelNumbers.get(
+                                    channelId, str(channel.get("number"))
+                                )
+                                epgId = customEpgIds.get(channelId, channelNumber)
+
+                                channelEle = ET.SubElement(
+                                    channels, "channel", id=epgId
+                                )
+                                ET.SubElement(
+                                    channelEle, "display-name"
+                                ).text = channelName
+                                ET.SubElement(
+                                    channelEle, "icon", src=channel.get("logo")
+                                )
+
+                                if channelId not in epg or not epg.get(channelId):
+                                    logger.warning(
+                                        f"No EPG data found for channel {channelName} (ID: {channelId}), Creating a Dummy EPG item."
+                                    )
+                                    start_time = datetime.now(timezone.utc).replace(
+                                        minute=0, second=0, microsecond=0
+                                    )
+                                    stop_time = start_time + timedelta(hours=24)
+                                    start = (
+                                        start_time.strftime("%Y%m%d%H%M%S")
+                                        + " +0000"
+                                    )
+                                    stop = (
+                                        stop_time.strftime("%Y%m%d%H%M%S")
+                                        + " +0000"
+                                    )
+                                    programmeEle = ET.SubElement(
+                                        programmes,
+                                        "programme",
+                                        start=start,
+                                        stop=stop,
+                                        channel=epgId,
+                                    )
+                                    ET.SubElement(
+                                        programmeEle, "title"
+                                    ).text = channelName
+                                    ET.SubElement(
+                                        programmeEle, "desc"
+                                    ).text = channelName
+                                else:
+                                    for p in epg.get(channelId):
+                                        try:
+                                            start_time = datetime.fromtimestamp(
+                                                p.get("start_timestamp"),
+                                                timezone.utc,
+                                            ) + timedelta(
+                                                hours=portal_epg_offset
+                                            )
+                                            stop_time = datetime.fromtimestamp(
+                                                p.get("stop_timestamp"),
+                                                timezone.utc,
+                                            ) + timedelta(
+                                                hours=portal_epg_offset
+                                            )
+                                            start = (
+                                                start_time.strftime("%Y%m%d%H%M%S")
+                                                + " +0000"
+                                            )
+                                            stop = (
+                                                stop_time.strftime("%Y%m%d%H%M%S")
+                                                + " +0000"
+                                            )
+                                            if start <= day_before_yesterday_str:
+                                                continue
+                                            programmeEle = ET.SubElement(
+                                                programmes,
+                                                "programme",
+                                                start=start,
+                                                stop=stop,
+                                                channel=epgId,
+                                            )
+                                            ET.SubElement(
+                                                programmeEle, "title"
+                                            ).text = p.get("name")
+                                            ET.SubElement(
+                                                programmeEle, "desc"
+                                            ).text = p.get("descr")
+                                        except Exception as e:
+                                            logger.error(
+                                                f"Error processing programme for channel {channelName} (ID: {channelId}): {e}"
+                                            )
+                                            pass
+                        except Exception as e:
+                            logger.error(
+                                f"| Channel:{channelNumber} | {channelName} | {e}"
+                            )
+                            pass
+                else:
+                    logger.error(f"Error making XMLTV for {name}, skipping")
+
+    xmltv = channels
+    for programme in programmes.iter("programme"):
+        xmltv.append(programme)
+
+    existing_programme_hashes = {
+        ET.tostring(p, encoding="unicode")
+        for p in xmltv.findall("programme")
+    }
+    for cached in cached_programmes:
+        if cached not in existing_programme_hashes:
+            xmltv.append(ET.fromstring(cached))
+
+    rough_string = ET.tostring(xmltv, encoding="unicode")
+    reparsed = minidom.parseString(rough_string)
+    formatted_xmltv = "\n".join(
+        [line for line in reparsed.toprettyxml(indent="  ").splitlines() if line.strip()]
+    )
+
+    with open(cache_file, "w", encoding="utf-8") as f:
+        f.write(formatted_xmltv)
+    logger.info("XMLTV cache updated.")
+
+    global cached_xmltv, last_updated
+    cached_xmltv = formatted_xmltv
+    last_updated = time.time()
+    logger.debug(f"Generated XMLTV: {formatted_xmltv}")
+
+
+@app.route("/xmltv", methods=["GET"])
+@authorise
+def xmltv():
+    global cached_xmltv, last_updated
+    logger.info("Guide Requested")
+
+    if cached_xmltv is None or (time.time() - last_updated) > 900:
+        refresh_xmltv()
+
+    return Response(
+        cached_xmltv,
+        mimetype="text/xml",
+    )
+
+
+@app.route("/play/<portalId>/<channelId>", methods=["GET"])
+def channel(portalId, channelId):
+    def streamData():
+        def occupy():
+            occupied.setdefault(portalId, [])
+            occupied.get(portalId, []).append(
+                {
+                    "mac": mac,
+                    "channel id": channelId,
+                    "channel name": channelName,
+                    "client": ip,
+                    "portal name": portalName,
+                    "start time": startTime,
+                }
+            )
+            logger.info("Occupied Portal({}):MAC({})".format(portalId, mac))
+
+        def unoccupy():
             try:
-                logger.info(f"Starting stream for Portal({portal['name']}), MAC({mac}), Channel({channel_id})")
-                with stb.getStream(
-                    url, mac, proxy, cmd, channel_id, time_zone, user_agent, timeout
-                ) as stream:
-                    ffmpeg_path = "ffmpeg"
-                    ffmpeg_cmd = [
+                occupied.get(portalId, []).remove(
+                    {
+                        "mac": mac,
+                        "channel id": channelId,
+                        "channel name": channelName,
+                        "client": ip,
+                        "portal name": portalName,
+                        "start time": startTime,
+                    }
+                )
+                logger.info("Unoccupied Portal({}):MAC({})".format(portalId, mac))
+            except Exception:
+                pass
+
+        try:
+            startTime = datetime.now(timezone.utc).timestamp()
+            occupy()
+            with subprocess.Popen(
+                ffmpegcmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            ) as ffmpeg_sp:
+                while True:
+                    chunk = ffmpeg_sp.stdout.read(1024)
+                    if len(chunk) == 0:
+                        if ffmpeg_sp.poll() != 0:
+                            logger.info(
+                                "Ffmpeg closed with error({}). Moving MAC({}) for Portal({})".format(
+                                    str(ffmpeg_sp.poll()), mac, portalName
+                                )
+                            )
+                            moveMac(portalId, mac)
+                        break
+                    yield chunk
+        except Exception:
+            pass
+        finally:
+            try:
+                unoccupy()
+            except Exception:
+                pass
+            try:
+                ffmpeg_sp.kill()
+            except Exception:
+                pass
+
+    def testStream():
+        timeout = int(getSettings()["ffmpeg timeout"]) * int(1000000)
+        ffprobecmd = [ffprobe_path, "-timeout", str(timeout), "-i", link]
+
+        if proxy:
+            ffprobecmd.insert(1, "-http_proxy")
+            ffprobecmd.insert(2, proxy)
+
+        with subprocess.Popen(
+            ffprobecmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as ffprobe_sb:
+            ffprobe_sb.communicate()
+            if ffprobe_sb.returncode == 0:
+                return True
+            else:
+                return False
+
+    def isMacFree():
+        count = 0
+        for i in occupied.get(portalId, []):
+            if i["mac"] == mac:
+                count = count + 1
+        if count < streamsPerMac:
+            return True
+        else:
+            return False
+
+    portal = getPortals().get(portalId)
+    if not portal:
+        return make_response("Portal not found", 404)
+
+    portalName = portal.get("name")
+    url = portal.get("url")
+    macs = list(portal["macs"].keys())
+    streamsPerMac = int(portal.get("streams per mac"))
+    proxy = portal.get("proxy")
+    web = request.args.get("web")
+    ip = request.remote_addr
+
+    logger.info(
+        "IP({}) requested Portal({}):Channel({})".format(ip, portalId, channelId)
+    )
+
+    freeMac = False
+
+    for mac in macs:
+        channels = None
+        cmd = None
+        link = None
+        if streamsPerMac == 0 or isMacFree():
+            logger.info(
+                "Trying Portal({}):MAC({}):Channel({})".format(
+                    portalId, mac, channelId
+                )
+            )
+            freeMac = True
+            token = stb.getToken(url, mac, proxy)
+            if token:
+                stb.getProfile(url, mac, token, proxy)
+                channels = stb.getAllChannels(url, mac, token, proxy)
+
+        if channels:
+            for c in channels:
+                if str(c["id"]) == channelId:
+                    channelName = portal.get("custom channel names", {}).get(
+                        channelId
+                    )
+                    if channelName is None:
+                        channelName = c["name"]
+                    cmd = c["cmd"]
+                    break
+
+        if cmd:
+            if "http://localhost/" in cmd:
+                link = stb.getLink(url, mac, token, cmd, proxy)
+            else:
+                parts = cmd.split(" ")
+                if len(parts) > 1:
+                    link = parts[1]
+                else:
+                    link = cmd
+
+        if link:
+            if (
+                getSettings().get("test streams", "true") == "false"
+                or testStream()
+            ):
+                if web:
+                    ffmpegcmd = [
                         ffmpeg_path,
+                        "-loglevel",
+                        "panic",
+                        "-hide_banner",
                         "-i",
-                        "pipe:0",
-                        "-c",
+                        link,
+                        "-vcodec",
                         "copy",
                         "-f",
-                        "mpegts",
-                        "pipe:1",
+                        "mp4",
+                        "-movflags",
+                        "frag_keyframe+empty_moov",
+                        "pipe:",
                     ]
+                    if proxy:
+                        ffmpegcmd.insert(1, "-http_proxy")
+                        ffmpegcmd.insert(2, proxy)
+                    return Response(
+                        streamData(), mimetype="application/octet-stream"
+                    )
 
-                    with subprocess.Popen(
-                        ffmpeg_cmd,
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                    ) as ffmpeg_sp:
-                        # Starting stderr read in a separate thread
-                        last_stderr = []
+                else:
+                    if (
+                        getSettings().get("stream method", "ffmpeg")
+                        == "ffmpeg"
+                    ):
+                        ffmpegcmd_str = (
+                            f"{ffmpeg_path} {getSettings()['ffmpeg command']}"
+                        )
+                        ffmpegcmd_str = ffmpegcmd_str.replace("<url>", link)
+                        ffmpegcmd_str = ffmpegcmd_str.replace(
+                            "<timeout>",
+                            str(
+                                int(getSettings()["ffmpeg timeout"])
+                                * int(1000000)
+                            ),
+                        )
+                        if proxy:
+                            ffmpegcmd_str = ffmpegcmd_str.replace(
+                                "<proxy>", proxy
+                            )
+                        else:
+                            ffmpegcmd_str = ffmpegcmd_str.replace(
+                                "-http_proxy <proxy>", ""
+                            )
+                        ffmpegcmd_str = " ".join(ffmpegcmd_str.split())
+                        ffmpegcmd = ffmpegcmd_str.split()
+                        return Response(
+                            streamData(), mimetype="application/octet-stream"
+                        )
+                    else:
+                        logger.info("Redirect sent")
+                        return redirect(link)
 
-                        def read_stderr(proc, buffer):
-                            for line in iter(proc.stderr.readline, b""):
-                                buffer.append(line.decode(errors="ignore"))
-                                if len(buffer) > 100:
-                                    buffer.pop(0)
+        logger.info(
+            "Unable to connect to Portal({}) using MAC({})".format(portalId, mac)
+        )
+        logger.info("Moving MAC({}) for Portal({})".format(mac, portalName))
+        moveMac(portalId, mac)
 
-                        stderr_thread = threading.Thread(target=read_stderr, args=(ffmpeg_sp, last_stderr))
-                        stderr_thread.start()
+        if not getSettings().get("try all macs", "true") == "true":
+            break
 
-                        start_time = time.time()
-                        chunk_count = 0
+    if freeMac:
+        logger.info(
+            "No working streams found for Portal({}):Channel({})".format(
+                portalId, channelId
+            )
+        )
+    else:
+        logger.info(
+            "No free MAC for Portal({}):Channel({})".format(portalId, channelId)
+        )
 
-                        while True:
-                            chunk = stream.read(bufferSize)
-                            if not chunk:
-                                logger.info("No streaming data from source detected.")
-                                break
+    return make_response("No streams available", 503)
 
-                            ffmpeg_sp.stdin.write(chunk)
-                            ffmpeg_sp.stdin.flush()
-                            out_chunk = ffmpeg_sp.stdout.read(bufferSize)
-                            if not out_chunk:
-                                logger.info("No streaming data from ffmpeg detected.")
-                                if ffmpeg_sp.poll() is not None:
-                                    logger.debug("Ffmpeg process closed / exited already with return / error code ({}).".format(str(ffmpeg_sp.poll())))
-                                    error_text = "\n".join(last_stderr)
-                                    logger.error(f"FFmpeg error: {error_text}")
-                                    break
-                            else:
-                                yield out_chunk
 
-                            chunk_count += 1
+@app.route("/dashboard")
+@authorise
+def dashboard():
+    return render_template("dashboard.html")
 
-                        duration = time.time() - start_time
-                        mac_info["stats"]["playtime"] += duration
-                        savePortals(portals)
 
-            except Exception as e:
-                mac_info["stats"]["errors"] += 1
-                savePortals(portals)
-                logger.error(f"Error during streaming: {e}")
-                return
+@app.route("/streaming")
+@authorise
+def streaming():
+    return flask.jsonify(occupied)
 
-    return Response(stream_with_context(generate()), mimetype="video/mp2t")
+
+@app.route("/log")
+@authorise
+def log():
+    logFilePath = "/app/logs/MacReplayV2.log"
+
+    try:
+        with open(logFilePath) as f:
+            log_content = f.read()
+        return log_content
+    except FileNotFoundError:
+        return "Log file not found"
+
+
+def hdhr(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        settings = getSettings()
+        security = settings["enable security"]
+        username = settings["username"]
+        password = settings["password"]
+        hdhrenabled = settings["enable hdhr"]
+        if (
+            security == "false"
+            or auth
+            and auth.username == username
+            and auth.password == password
+        ):
+            if hdhrenabled:
+                return f(*args, **kwargs)
+        return make_response("Error", 404)
+
+    return decorated
+
+
+@app.route("/discover.json", methods=["GET"])
+@hdhr
+def discover():
+    logger.info("HDHR Status Requested.")
+    settings = getSettings()
+    name = settings["hdhr name"]
+    id = settings["hdhr id"]
+    tuners = settings["hdhr tuners"]
+    data = {
+        "BaseURL": host,
+        "DeviceAuth": name,
+        "DeviceID": id,
+        "FirmwareName": "MacReplayV2",
+        "FirmwareVersion": "666",
+        "FriendlyName": name,
+        "LineupURL": host + "/lineup.json",
+        "Manufacturer": "Evilvirus",
+        "ModelNumber": "666",
+        "TunerCount": int(tuners),
+    }
+    return flask.jsonify(data)
+
+
+@app.route("/lineup_status.json", methods=["GET"])
+@hdhr
+def status():
+    data = {
+        "ScanInProgress": 0,
+        "ScanPossible": 0,
+        "Source": "Cable",
+        "SourceList": ["Cable"],
+    }
+    return flask.jsonify(data)
+
+
+def refresh_lineup():
+    global cached_lineup
+    logger.info("Refreshing Lineup...")
+    lineup = []
+    portals = getPortals()
+    for portal in portals:
+        if portals[portal]["enabled"] == "true":
+            enabledChannels = portals[portal].get("enabled channels", [])
+            if len(enabledChannels) != 0:
+                name = portals[portal]["name"]
+                url = portals[portal]["url"]
+                macs = list(portals[portal]["macs"].keys())
+                proxy = portals[portal]["proxy"]
+                customChannelNames = portals[portal].get(
+                    "custom channel names", {}
+                )
+                customChannelNumbers = portals[portal].get(
+                    "custom channel numbers", {}
+                )
+
+                for mac in macs:
+                    try:
+                        token = stb.getToken(url, mac, proxy)
+                        stb.getProfile(url, mac, token, proxy)
+                        allChannels = stb.getAllChannels(url, mac, token, proxy)
+                        break
+                    except Exception:
+                        allChannels = None
+
+                if allChannels:
+                    for channel in allChannels:
+                        channelId = str(channel.get("id"))
+                        if channelId in enabledChannels:
+                            channelName = customChannelNames.get(channelId)
+                            if channelName is None:
+                                channelName = str(channel.get("name"))
+                            channelNumber = customChannelNumbers.get(channelId)
+                            if channelNumber is None:
+                                channelNumber = str(channel.get("number"))
+
+                            lineup.append(
+                                {
+                                    "GuideNumber": channelNumber,
+                                    "GuideName": channelName,
+                                    "URL": "http://"
+                                    + host
+                                    + "/play/"
+                                    + portal
+                                    + "/"
+                                    + channelId,
+                                }
+                            )
+                else:
+                    logger.error(
+                        "Error making lineup for {}, skipping".format(name)
+                    )
+
+    lineup.sort(key=lambda x: int(x["GuideNumber"]))
+
+    cached_lineup = lineup
+    logger.info("Lineup Refreshed.")
+
+
+@app.route("/lineup.json", methods=["GET"])
+@app.route("/lineup.post", methods=["POST"])
+@hdhr
+def lineup():
+    logger.info("Lineup Requested")
+    if not cached_lineup:
+        refresh_lineup()
+    logger.info("Lineup Delivered")
+    return jsonify(cached_lineup)
+
+
+@app.route("/refresh_lineup", methods=["POST"])
+def refresh_lineup_endpoint():
+    refresh_lineup()
+    return jsonify({"status": "Lineup refreshed successfully"})
+
+
+def start_refresh():
+    threading.Thread(target=refresh_lineup, daemon=True).start()
+    start_epg_scheduler()
+
+
+def start_epg_scheduler(interval_seconds: int = EPG_REFRESH_INTERVAL_SECONDS):
+    interval_hours = interval_seconds / 3600
+
+    def _epg_worker():
+        logger.info(
+            f"Background EPG refresh thread started; updating every {interval_hours:.2f} hour(s)."
+        )
+        while True:
+            try:
+                refresh_xmltv()
+                logger.info("Background EPG refresh completed.")
+            except Exception as exc:
+                logger.error(f"Background EPG refresh failed: {exc}")
+            time.sleep(interval_seconds)
+
+    threading.Thread(
+        target=_epg_worker, daemon=True, name="EPGRefreshScheduler"
+    ).start()
 
 
 if __name__ == "__main__":
     config = loadConfig()
-    if debugMode or ("TERM_PROGRAM" in os.environ.keys() and os.environ["TERM_PROGRAM"] == "vscode"):
-        # If DEBUG is active or code running In VS Code, use default flask development sever in debug mode
-        logger.info("ATTENTION: Server started in debug mode. Don't use on productive systems!")
-        app.run(host="0.0.0.0", port=8001, debug=True, use_reloader=True)
-        # Note: Flask server in debug mode can lead to errors in vscode debugger ([errno 98] address in use)
-        #app.run(host="0.0.0.0", port=8001, debug=False)
-    else:
-        # On release use waitress server with multi-threading
-        waitress.serve(app, port=8001, _quiet=True, threads=24)
+    start_refresh()
+
+    # Always use waitress for production in container
+    waitress.serve(app, host="0.0.0.0", port=8001, _quiet=True, threads=24)
