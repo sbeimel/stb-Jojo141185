@@ -100,7 +100,7 @@ defaultPortal = {
     "enabled": "true",
     "name": "",
     "url": "",
-    "macs": defaultdict(lambda: default_mac_info),
+    "macs": defaultdict(lambda: copy.deepcopy(default_mac_info)),
     "streams per mac": "1",
     "epgTimeOffset": "0",
     "proxy": "",
@@ -301,7 +301,10 @@ def test_mac_addresses(url, proxy, macs, name, time_zone):
 
 def portal_update_macs(portal, macs=None, retest=False):
     # Retrieve old MAC addresses from portal
-    old_macs_dict = portal["macs"]
+    old_macs_dict = portal.get("macs") or {}
+    # In case the stored value is a list (old configs), reset to empty dict
+    if isinstance(old_macs_dict, list):
+        old_macs_dict = {}
     
     old_macs_set = set(old_macs_dict.keys() if old_macs_dict else [])
     new_macs_set = set(macs if macs else [])
@@ -586,11 +589,36 @@ def portals_add():
         streams_per_mac = request.form.get("streams per mac")
         epg_time_offset = request.form.get("epg time offset")
         time_zone = request.form.get("time_zone")
-        macs_data = request.form.get("macs", "[]")
+
+        # Try multiple possible field names for MACs in the HTML form
+        macs_data = (
+            request.form.get("macs")
+            or request.form.get("macs[]")
+            or request.form.get("mac")
+            or request.form.get("mac_addresses")
+            or ""
+        )
+
+        macs = []
+
+        # 1) Try to interpret macs_data as JSON (e.g. ["AA:BB:CC:DD:EE:FF"])
         try:
-            macs = json.loads(macs_data) if macs_data else []
-        except json.JSONDecodeError:
-            macs = []
+            parsed = json.loads(macs_data)
+            if isinstance(parsed, list):
+                macs = parsed
+            elif isinstance(parsed, str):
+                macs_data = parsed
+        except Exception:
+            # Not JSON, fall back to plain text parsing below
+            pass
+
+        # 2) If still empty, treat as plain text (textarea):
+        #    allow separators like newlines, commas, semicolons
+        if not macs and isinstance(macs_data, str):
+            tmp = macs_data.replace("\r", "\n")
+            for sep in [",", ";"]:
+                tmp = tmp.replace(sep, "\n")
+            macs = [m.strip() for m in tmp.split("\n") if m.strip()]
 
     logger.info(f"Add portal request: name={name}, url={url}, macs={macs}")
 
@@ -629,7 +657,8 @@ def portals_add():
         "enabled": "true",
         "name": name,
         "url": url,
-        "macs": [],
+        # Initialize MACs as a dict with default stats structure
+        "macs": defaultdict(lambda: copy.deepcopy(default_mac_info)),
         "streams per mac": streams_per_mac,
         "epgTimeOffset": epg_time_offset,
         "time_zone": time_zone,
@@ -1822,3 +1851,6 @@ if __name__ == "__main__":
     else:
         # On release use waitress server with multi-threading
         waitress.serve(app, port=8001, _quiet=True, threads=24)
+
+
+
